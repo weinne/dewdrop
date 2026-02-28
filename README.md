@@ -34,7 +34,7 @@ You don’t need to pre‑install `rclone` or `gum`. The script will bootstrap w
 
 ```bash
 # 1. Download the script
-wget https://raw.githubusercontent.com/SEU_USUARIO/SEU_REPO/main/rclone-auto.sh
+wget https://raw.githubusercontent.com/weinne/rclone-auto/main/rclone-auto.sh
 
 # 2. Make it executable
 chmod +x rclone-auto.sh
