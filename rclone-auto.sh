@@ -335,6 +335,42 @@ install_system() {
     if [ -f "$CURRENT_PATH" ] && [ "$CURRENT_PATH" != "$TARGET_BIN" ]; then cp -f "$CURRENT_PATH" "$TARGET_BIN"; chmod +x "$TARGET_BIN"; fi
     if [ "$GUM_BIN" == "$SCRIPT_DIR/gum" ] && [ ! -f "$USER_BIN_DIR/gum" ]; then cp "$SCRIPT_DIR/gum" "$USER_BIN_DIR/"; chmod +x "$USER_BIN_DIR/gum"; fi
 
+    # Helper: espera internet antes de iniciar mounts/syncs (usado via ExecStartPre nos units).
+    cat <<'EOF' > "$USER_BIN_DIR/rclone-auto-wait-online"
+#!/usr/bin/env bash
+set -euo pipefail
+
+URL="${1:-https://connectivitycheck.gstatic.com/generate_204}"
+TIMEOUT="${RCLONE_AUTO_NET_TIMEOUT:-120}"
+INTERVAL="${RCLONE_AUTO_NET_INTERVAL:-2}"
+
+end=$((SECONDS + TIMEOUT))
+while (( SECONDS < end )); do
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --max-time 5 "$URL" >/dev/null 2>&1; then
+            exit 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q --spider --timeout=5 "$URL" >/dev/null 2>&1; then
+            exit 0
+        fi
+    fi
+
+    # Fallback barato: pelo menos DNS funcional.
+    if command -v getent >/dev/null 2>&1; then
+        if getent hosts rclone.org >/dev/null 2>&1; then
+            exit 0
+        fi
+    fi
+
+    sleep "$INTERVAL"
+done
+
+echo "rclone-auto: internet não disponível após ${TIMEOUT}s" >&2
+exit 1
+EOF
+    chmod +x "$USER_BIN_DIR/rclone-auto-wait-online"
+
     # Opcional: tenta garantir que 'yad' esteja disponível para a integração gráfica do resolvedor.
     # Se não conseguir (ou se não houver TTY), apenas segue sem falhar a instalação.
     ensure_yad >/dev/null 2>&1 || true
@@ -389,6 +425,7 @@ setup_sync() {
 Description=Sync $REMOTE
 [Service]
 Type=oneshot
+ExecStartPre=%h/.local/bin/rclone-auto-wait-online
 ExecStart=$(readlink -f "$RCLONE_BIN") bisync "${REMOTE}:" "${LOCAL}" --create-empty-src-dirs --compare size,modtime,checksum --slow-hash-sync-only --resync --verbose
 EOF
     cat <<EOF > "$SYSTEMD_DIR/rclone-sync-${REMOTE}.timer"
@@ -417,13 +454,17 @@ setup_mount() {
     cat <<EOF > "$SYSTEMD_DIR/rclone-mount-${REMOTE}.service"
 [Unit]
 Description=Mount $REMOTE
+After=graphical-session.target
+PartOf=graphical-session.target
 [Service]
 Type=notify
+ExecStartPre=%h/.local/bin/rclone-auto-wait-online
 ExecStart=$(readlink -f "$RCLONE_BIN") mount ${REMOTE}: "${LOCAL}" --vfs-cache-mode full --no-modtime
 ExecStop=/bin/fusermount -u "${LOCAL}"
 Restart=on-failure
+RestartSec=10
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
     $GUM_BIN spin --spinner dot --title "Montando disco..." -- sleep 1
     systemctl --user daemon-reload

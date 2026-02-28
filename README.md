@@ -110,6 +110,18 @@ rclone-auto
   - `rclone-sync-<name>.service` + `rclone-sync-<name>.timer` for periodic `rclone bisync`.
   - Runs entirely under `systemctl --user` – no `sudo` required for normal operation.
 
+### Boot / Session behavior
+
+- Mount auto-start is now tied to the **graphical session** (via `graphical-session.target`).
+- Mounts and sync runs wait for **internet** before starting (via an `ExecStartPre` helper).
+
+If you created services with an older version, run the fixer script once:
+
+```bash
+chmod +x fix-existing-services.sh
+./fix-existing-services.sh
+```
+
 - **Core script behavior**
   - Ensures it is running in a real terminal (`ensure_terminal`).
   - Bootstraps `gum` and `rclone` if binaries are missing.
