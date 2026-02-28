@@ -341,7 +341,7 @@ install_system() {
 set -euo pipefail
 
 URL="${1:-https://connectivitycheck.gstatic.com/generate_204}"
-TIMEOUT="${RCLONE_AUTO_NET_TIMEOUT:-120}"
+TIMEOUT="${RCLONE_AUTO_NET_TIMEOUT:-6}"
 INTERVAL="${RCLONE_AUTO_NET_INTERVAL:-2}"
 
 end=$((SECONDS + TIMEOUT))
@@ -462,7 +462,8 @@ ExecStartPre=%h/.local/bin/rclone-auto-wait-online
 ExecStart=$(readlink -f "$RCLONE_BIN") mount ${REMOTE}: "${LOCAL}" --vfs-cache-mode full --no-modtime
 ExecStop=/bin/fusermount -u "${LOCAL}"
 Restart=on-failure
-RestartSec=10
+RestartSec=15
+StartLimitIntervalSec=0
 [Install]
 WantedBy=graphical-session.target
 EOF

@@ -114,6 +114,7 @@ rclone-auto
 
 - Mount auto-start is now tied to the **graphical session** (via `graphical-session.target`).
 - Mounts and sync runs wait for **internet** before starting (via an `ExecStartPre` helper).
+- Internet check is **fail-fast + retry** (short timeout), so it does not block boot/login for long when network is still coming up.
 
 If you created services with an older version, run the fixer script once:
 
