@@ -22,6 +22,7 @@
 - **⚡ Two operation modes**:
   - **Mount**: Turns the cloud into a virtual drive (on‑demand access, minimal local space).
   - **Sync**: Creates a real offline copy with scheduled bi‑directional sync (every 15 minutes).
+- **📁 Custom Local Directory**: Choose a custom local folder per remote, with a simple browser starting at `/home` and detected mounted disks.
 - **🧠 Contextual Management Menu**: Manage connections intuitively: pick a connection → choose actions (Open Folder, Stop, Rename, Delete).
 - **🏷️ Naming conventions**: Encourages organized names (e.g. `drive-work`, `s3-backup`) with a dynamic list of providers.
 - **🛠️ System Tools**: Automatically creates app launchers and desktop shortcuts, fixes folder icons and updates binaries.
@@ -89,6 +90,21 @@ rclone-auto
      - **Activate Mount / Sync**
      - **Rename** (renames the `rclone` config section and the local folder)
      - **Delete** (stops everything and removes the remote from `rclone config`)
+     - **Change Local Directory** (updates service paths for mount/sync)
+
+### Custom Local Path Behavior
+
+- During new connection setup, you can choose:
+  - default path: `~/Nuvem/<remote-name>`
+  - custom path: selected via interactive folder picker
+- The folder picker starts from:
+  - your home path
+  - `/home`
+  - mounted disks under `/mnt`, `/media`, and `/run/media/$USER`
+- When changing directory for an existing **sync** connection, the app automatically:
+  - stops sync service/timer
+  - moves local files to the new folder
+  - rewrites units and restores previous active/enabled state
 
 3. **🛠️ Tools**
    - **Create Desktop Shortcuts** for all active mounts (one `.desktop` file per remote).
@@ -106,6 +122,17 @@ rclone-auto
 
 5. **🚪 Exit**
    - Clears the screen and quits.
+
+### CLI Diagnostics (No TUI)
+
+You can run a full diagnostic directly in terminal without opening the interactive menu:
+
+```bash
+./rclone-auto.sh --test-all
+```
+
+- Exit code `0`: no failures found
+- Exit code `1`: one or more problems detected
 
 ---
 
@@ -153,6 +180,7 @@ Or run it from the app menu:
 - **Icons / Desktop integration**
   - Writes a `.directory` file inside `~/Nuvem` so file managers (Dolphin, Nautilus, etc.) show a cloud‑style icon.
   - Creates `.desktop` shortcuts on `~/Desktop` for direct access to mounted folders.
+  - `Open Cloud Folder Options` resolver (`--open-path`) now works with both default and custom local paths configured per remote.
 
 ---
 

@@ -22,6 +22,7 @@ SHORTCUT_DIR="$HOME/.local/share/applications"
 CLOUD_DIR="$HOME/Nuvem"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
 RCLONE_SOURCE_FILE="$CONFIG_DIR/rclone-source.conf"
+REMOTE_PATHS_FILE="$CONFIG_DIR/remote-paths.conf"
 SYSTEM_ICON="folder-remote"
 
 CURRENT_PATH=$(readlink -f "$0")
@@ -73,26 +74,6 @@ handle_cli_args() {
                 TARGET_PATH="$TARGET_ABS"
             fi
 
-            # Se não estiver dentro da pasta de nuvem, apenas delega para xdg-open
-            case "$TARGET_PATH" in
-                "$CLOUD_DIR"/*) ;;
-                *)
-                    xdg-open "$TARGET_PATH" >/dev/null 2>&1 &
-                    exit 0
-                    ;;
-            esac
-
-            # Descobre remoto e subcaminho: ~/Nuvem/<remote>/<subpath>
-            REL="${TARGET_PATH#$CLOUD_DIR/}"
-            REMOTE_NAME="${REL%%/*}"
-            SUB_PATH="${REL#*/}"
-            if [ -z "$REMOTE_NAME" ] || [ "$REMOTE_NAME" = "$REL" ]; then
-                echo "rclone-auto: caminho não parece pertencer a um remoto em '$CLOUD_DIR'." >&2
-                exit 1
-            fi
-
-            REMOTE_SPEC="${REMOTE_NAME}:${SUB_PATH}"
-
             # Localiza binário do rclone (sem depender do splash)
             if [ -f "$USER_BIN_DIR/rclone" ]; then
                 RCLONE_BIN="$USER_BIN_DIR/rclone"
@@ -101,15 +82,42 @@ handle_cli_args() {
             fi
 
             if [ -z "$RCLONE_BIN" ]; then
-                echo "rclone-auto: rclone não encontrado para resolver caminho remoto." >&2
-                exit 1
+                xdg-open "$TARGET_PATH" >/dev/null 2>&1 &
+                exit 0
             fi
 
-            # Garante que REMOTE_NAME é de fato um remoto conhecido do rclone
-            if ! "$RCLONE_BIN" listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:"; then
-                echo "rclone-auto: '$REMOTE_NAME' não é um remoto rclone conhecido. Nada a fazer." >&2
-                exit 1
+            # Descobre remoto e subcaminho com base nos diretórios configurados (inclui caminhos personalizados).
+            BEST_REMOTE=""
+            BEST_BASE=""
+            while IFS= read -r REM; do
+                [ -n "$REM" ] || continue
+                REMOTE_NAME="${REM%:}"
+                LOCAL_BASE="$(get_remote_local_path "$REMOTE_NAME")"
+                LOCAL_BASE="$(readlink -m "$LOCAL_BASE")"
+
+                case "$TARGET_PATH" in
+                    "$LOCAL_BASE"|"$LOCAL_BASE"/*)
+                        if [ ${#LOCAL_BASE} -gt ${#BEST_BASE} ]; then
+                            BEST_REMOTE="$REMOTE_NAME"
+                            BEST_BASE="$LOCAL_BASE"
+                        fi
+                        ;;
+                esac
+            done < <("$RCLONE_BIN" listremotes 2>/dev/null)
+
+            if [ -z "$BEST_REMOTE" ]; then
+                xdg-open "$TARGET_PATH" >/dev/null 2>&1 &
+                exit 0
             fi
+
+            REMOTE_NAME="$BEST_REMOTE"
+            if [ "$TARGET_PATH" = "$BEST_BASE" ]; then
+                SUB_PATH=""
+            else
+                SUB_PATH="${TARGET_PATH#$BEST_BASE/}"
+            fi
+
+            REMOTE_SPEC="${REMOTE_NAME}:${SUB_PATH}"
             
             ITEM_NAME=$(basename "$TARGET_PATH")
 
@@ -201,6 +209,10 @@ handle_cli_args() {
 
             exit 0
             ;;
+        --test-all)
+            run_cli_diagnostic
+            exit $?
+            ;;
         --help|-h)
             echo "Uso: $APP_NAME [opções]"
             echo ""
@@ -209,7 +221,8 @@ handle_cli_args() {
             echo "Opções:"
             echo "  --enable-boot <nome-remoto>   Habilita auto-start (mount/sync) para o remoto"
             echo "  --disable-boot <nome-remoto>  Desabilita auto-start (mount/sync) para o remoto"
-            echo "  --open-path <caminho-local>   Abre menu 'Opções de Pasta na Nuvem' para itens em ~/Nuvem"
+            echo "  --open-path <caminho-local>   Abre menu 'Opções de Pasta na Nuvem' para itens em caminhos locais de remotos"
+            echo "  --test-all                    Executa diagnóstico completo em modo CLI (sem TUI)"
             echo "  -h, --help                    Mostra esta ajuda"
             exit 0
             ;;
@@ -289,6 +302,139 @@ load_rclone_source_preference() {
 save_rclone_source_preference() {
     printf '%s\n' "$1" > "$RCLONE_SOURCE_FILE"
     RCLONE_SOURCE="$1"
+}
+
+get_remote_local_path() {
+    REMOTE_NAME="$1"
+
+    if [ -f "$REMOTE_PATHS_FILE" ]; then
+        SAVED_PATH=$(awk -F'|' -v remote="$REMOTE_NAME" '$1 == remote { print substr($0, index($0, $2)); exit }' "$REMOTE_PATHS_FILE")
+        if [ -n "$SAVED_PATH" ]; then
+            echo "$SAVED_PATH"
+            return 0
+        fi
+    fi
+
+    echo "$CLOUD_DIR/$REMOTE_NAME"
+}
+
+set_remote_local_path() {
+    REMOTE_NAME="$1"
+    LOCAL_PATH="$2"
+
+    mkdir -p "$CONFIG_DIR"
+    TMP_FILE=$(mktemp)
+
+    if [ -f "$REMOTE_PATHS_FILE" ]; then
+        awk -F'|' -v remote="$REMOTE_NAME" '$1 != remote { print $0 }' "$REMOTE_PATHS_FILE" > "$TMP_FILE"
+    fi
+
+    printf '%s|%s\n' "$REMOTE_NAME" "$LOCAL_PATH" >> "$TMP_FILE"
+    mv "$TMP_FILE" "$REMOTE_PATHS_FILE"
+}
+
+delete_remote_local_path() {
+    REMOTE_NAME="$1"
+
+    if [ ! -f "$REMOTE_PATHS_FILE" ]; then
+        return 0
+    fi
+
+    TMP_FILE=$(mktemp)
+    awk -F'|' -v remote="$REMOTE_NAME" '$1 != remote { print $0 }' "$REMOTE_PATHS_FILE" > "$TMP_FILE"
+    mv "$TMP_FILE" "$REMOTE_PATHS_FILE"
+}
+
+list_directory_roots() {
+    ROOTS="$HOME\n/home"
+
+    for base in /mnt /media "/run/media/$USER"; do
+        if [ -d "$base" ]; then
+            for d in "$base"/*; do
+                [ -d "$d" ] || continue
+                ROOTS="${ROOTS}\n${d}"
+            done
+        fi
+    done
+
+    echo -e "$ROOTS" | awk 'NF && !seen[$0]++'
+}
+
+browse_directory_picker() {
+    CURRENT_DIR="$1"
+
+    while true; do
+        OPTIONS="✅ Usar este diretório\n📁 Subir para pasta pai\n✍️ Informar caminho manualmente\n🔙 Cancelar"
+        CHILD_DIRS=$(find "$CURRENT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            OPTIONS="${OPTIONS}\n📂 $(basename "$d")"
+        done <<< "$CHILD_DIRS"
+
+        CHOICE=$(echo -e "$OPTIONS" | $GUM_BIN choose --height 18 --header "Diretório atual: $CURRENT_DIR")
+
+        case "$CHOICE" in
+            "✅"*)
+                echo "$CURRENT_DIR"
+                return 0
+                ;;
+            "📁"*)
+                PARENT_DIR=$(dirname "$CURRENT_DIR")
+                if [ "$PARENT_DIR" != "$CURRENT_DIR" ]; then
+                    CURRENT_DIR="$PARENT_DIR"
+                fi
+                ;;
+            "✍️"*)
+                MANUAL_PATH=$($GUM_BIN input --placeholder "$CURRENT_DIR")
+                [ -z "$MANUAL_PATH" ] && continue
+                CURRENT_DIR="$(readlink -m "$MANUAL_PATH")"
+                ;;
+            "📂 "*)
+                PICK_NAME="${CHOICE#📂 }"
+                CURRENT_DIR="$CURRENT_DIR/$PICK_NAME"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+}
+
+choose_local_path() {
+    DEFAULT_PATH="$1"
+    CHOICE=$(echo -e "📁 Usar pasta padrão ($DEFAULT_PATH)\n🗂️ Escolher pasta personalizada\n🔙 Cancelar" | $GUM_BIN choose --header "Diretório local")
+
+    case "$CHOICE" in
+        "📁"*)
+            SELECTED_PATH="$DEFAULT_PATH"
+            ;;
+        "🗂️"*)
+            ROOT_OPTIONS="$(list_directory_roots)"
+            ROOT_CHOICE=$(echo -e "$ROOT_OPTIONS\n🔙 Cancelar" | $GUM_BIN choose --header "Escolha ponto inicial (/home ou discos)")
+            if [[ "$ROOT_CHOICE" == *"Cancelar"* ]] || [ -z "$ROOT_CHOICE" ]; then
+                return 1
+            fi
+
+            if ! SELECTED_PATH=$(browse_directory_picker "$ROOT_CHOICE"); then
+                return 1
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    SELECTED_PATH="$(readlink -m "$SELECTED_PATH")"
+    if [ ! -d "$SELECTED_PATH" ]; then
+        if $GUM_BIN confirm "A pasta não existe. Criar agora?" --negative "Cancelar"; then
+            mkdir -p "$SELECTED_PATH"
+        else
+            return 1
+        fi
+    fi
+
+    echo "$SELECTED_PATH"
 }
 
 detect_package_installer() {
@@ -802,10 +948,147 @@ run_full_diagnostic() {
     fi
 }
 
+cli_result() {
+    OK="$1"
+    MSG="$2"
+    DETAIL="${3:-}"
+
+    if [ "$OK" -eq 0 ]; then
+        printf '[OK] %s\n' "$MSG"
+    else
+        printf '[FAIL] %s\n' "$MSG"
+        if [ -n "$DETAIL" ]; then
+            printf '       %s\n' "$DETAIL"
+        fi
+    fi
+}
+
+detect_rclone_for_cli() {
+    if [ -x "$USER_BIN_DIR/rclone" ]; then
+        echo "$USER_BIN_DIR/rclone"
+        return 0
+    fi
+
+    if command -v rclone >/dev/null 2>&1; then
+        command -v rclone
+        return 0
+    fi
+
+    return 1
+}
+
+run_cli_diagnostic() {
+    FAILS=0
+    MOUNT_UNITS=0
+    SYNC_UNITS=0
+
+    echo "RClone Auto - Diagnóstico CLI"
+    echo "Data: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo ""
+
+    if command -v systemctl >/dev/null 2>&1; then
+        cli_result 0 "systemctl disponível"
+    else
+        cli_result 1 "systemctl não encontrado"
+        FAILS=$((FAILS+1))
+    fi
+
+    if systemctl --user show-environment >/dev/null 2>&1; then
+        cli_result 0 "systemd --user acessível"
+    else
+        cli_result 1 "systemd --user inacessível" "Execute dentro de uma sessão de usuário com systemd --user ativo."
+        FAILS=$((FAILS+1))
+    fi
+
+    if RCLONE_PATH=$(detect_rclone_for_cli); then
+        cli_result 0 "rclone detectado" "$RCLONE_PATH"
+    else
+        RCLONE_PATH=""
+        cli_result 1 "rclone não encontrado" "Instale por pacote/binário no menu Ferramentas."
+        FAILS=$((FAILS+1))
+    fi
+
+    if command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1; then
+        cli_result 0 "FUSE disponível"
+    else
+        cli_result 1 "FUSE indisponível" "Instale fuse3 para mounts funcionarem."
+        FAILS=$((FAILS+1))
+    fi
+
+    if [ -x "$USER_BIN_DIR/rclone-auto-wait-online" ]; then
+        cli_result 0 "Helper de rede presente"
+    else
+        cli_result 1 "Helper de rede ausente" "Reinstale o script em Ferramentas -> Reinstalar Script."
+        FAILS=$((FAILS+1))
+    fi
+
+    if [ -n "$RCLONE_PATH" ]; then
+        REMOTES=$("$RCLONE_PATH" listremotes 2>/dev/null | sed 's/:$//')
+        if [ -n "$REMOTES" ]; then
+            cli_result 0 "Remotos configurados detectados"
+        else
+            cli_result 1 "Nenhum remoto configurado"
+        fi
+    else
+        REMOTES=""
+    fi
+
+    for unit_path in "$SYSTEMD_DIR"/rclone-mount-*.service; do
+        [ -f "$unit_path" ] || continue
+        MOUNT_UNITS=$((MOUNT_UNITS+1))
+        unit_name=$(basename "$unit_path")
+        remote="${unit_name#rclone-mount-}"
+        remote="${remote%.service}"
+
+        if grep -q "StartLimitIntervalSec" "$unit_path"; then
+            cli_result 1 "$unit_name contém chave legada incompatível" "Rode Ferramentas -> Corrigir Serviços Existentes."
+            FAILS=$((FAILS+1))
+        fi
+
+        if grep -q "^ExecStop=/bin/fusermount" "$unit_path"; then
+            cli_result 1 "$unit_name usa ExecStop legado (/bin/fusermount)" "Rode Ferramentas -> Corrigir Serviços Existentes."
+            FAILS=$((FAILS+1))
+        fi
+
+        if [ -n "$RCLONE_PATH" ] && ! "$RCLONE_PATH" listremotes 2>/dev/null | grep -q "^${remote}:"; then
+            cli_result 1 "$unit_name aponta para remoto inexistente" "$remote"
+            FAILS=$((FAILS+1))
+        fi
+
+        if systemctl --user is-enabled --quiet "$unit_name" 2>/dev/null && ! systemctl --user is-active --quiet "$unit_name" 2>/dev/null; then
+            cli_result 1 "$unit_name está enabled mas inativo" "Verifique: systemctl --user status $unit_name"
+            FAILS=$((FAILS+1))
+        fi
+    done
+
+    for unit_path in "$SYSTEMD_DIR"/rclone-sync-*.timer; do
+        [ -f "$unit_path" ] || continue
+        SYNC_UNITS=$((SYNC_UNITS+1))
+        unit_name=$(basename "$unit_path")
+
+        if systemctl --user is-enabled --quiet "$unit_name" 2>/dev/null && ! systemctl --user is-active --quiet "$unit_name" 2>/dev/null; then
+            cli_result 1 "$unit_name está enabled mas inativo" "Verifique: systemctl --user status $unit_name"
+            FAILS=$((FAILS+1))
+        fi
+    done
+
+    echo ""
+    echo "Resumo: mounts=$MOUNT_UNITS, timers=$SYNC_UNITS, falhas=$FAILS"
+
+    if [ "$FAILS" -eq 0 ]; then
+        echo "Diagnóstico CLI concluído sem falhas."
+        return 0
+    fi
+
+    echo "Diagnóstico CLI encontrou falhas."
+    return 1
+}
+
 # --- 3. Lógica Core ---
 
 setup_sync() {
-    REMOTE="$1"; LOCAL="$CLOUD_DIR/$REMOTE"; AUTO_START="$2"
+    REMOTE="$1"; AUTO_START="$2"; LOCAL="${3:-$(get_remote_local_path "$REMOTE")}"
+    set_remote_local_path "$REMOTE" "$LOCAL"
     mkdir -p "$LOCAL"
     cat <<EOF > "$SYSTEMD_DIR/rclone-sync-${REMOTE}.service"
 [Unit]
@@ -837,7 +1120,8 @@ EOF
 }
 
 setup_mount() {
-    REMOTE="$1"; LOCAL="$CLOUD_DIR/$REMOTE"; AUTO_START="$2"
+    REMOTE="$1"; AUTO_START="$2"; LOCAL="${3:-$(get_remote_local_path "$REMOTE")}"
+    set_remote_local_path "$REMOTE" "$LOCAL"
     mkdir -p "$LOCAL"
     cat <<EOF > "$SYSTEMD_DIR/rclone-mount-${REMOTE}.service"
 [Unit]
@@ -868,6 +1152,131 @@ EOF
     else
         ui_error "Houve um erro ao montar o disco."
     fi
+}
+
+change_remote_local_directory() {
+    REMOTE="$1"
+    CURRENT_LOCAL="$(get_remote_local_path "$REMOTE")"
+
+    ui_talk "Diretório atual de $REMOTE: $CURRENT_LOCAL"
+    if ! NEW_LOCAL=$(choose_local_path "$CURRENT_LOCAL"); then
+        ui_talk "Alteração de diretório cancelada."
+        return
+    fi
+
+    if [ "$NEW_LOCAL" = "$CURRENT_LOCAL" ]; then
+        ui_talk "Diretório não alterado."
+        return
+    fi
+
+    MOUNT_UNIT="rclone-mount-${REMOTE}.service"
+    SYNC_SERVICE="rclone-sync-${REMOTE}.service"
+    SYNC_TIMER="rclone-sync-${REMOTE}.timer"
+
+    HAS_MOUNT=0
+    HAS_SYNC=0
+    HAS_TIMER=0
+    [ -f "$SYSTEMD_DIR/$MOUNT_UNIT" ] && HAS_MOUNT=1
+    [ -f "$SYSTEMD_DIR/$SYNC_SERVICE" ] && HAS_SYNC=1
+    [ -f "$SYSTEMD_DIR/$SYNC_TIMER" ] && HAS_TIMER=1
+
+    MOUNT_ACTIVE=0; MOUNT_ENABLED=0
+    SYNC_ACTIVE=0; SYNC_ENABLED=0
+
+    systemctl --user is-active --quiet "$MOUNT_UNIT" 2>/dev/null && MOUNT_ACTIVE=1
+    systemctl --user is-enabled --quiet "$MOUNT_UNIT" 2>/dev/null && MOUNT_ENABLED=1
+    systemctl --user is-active --quiet "$SYNC_TIMER" 2>/dev/null && SYNC_ACTIVE=1
+    systemctl --user is-enabled --quiet "$SYNC_TIMER" 2>/dev/null && SYNC_ENABLED=1
+
+    systemctl --user stop "$MOUNT_UNIT" "$SYNC_TIMER" "$SYNC_SERVICE" 2>/dev/null || true
+
+    # Em sync, move os dados locais antes de recriar os units com o novo caminho.
+    if [ "$HAS_SYNC" -eq 1 ] && [ -d "$CURRENT_LOCAL" ] && [ "$CURRENT_LOCAL" != "$NEW_LOCAL" ]; then
+        case "$NEW_LOCAL/" in
+            "$CURRENT_LOCAL/"*)
+                ui_error "Novo caminho dentro do antigo não é suportado para migração automática em sync."
+                return
+                ;;
+        esac
+
+        mkdir -p "$NEW_LOCAL"
+        shopt -s dotglob nullglob
+        MOVE_ITEMS=("$CURRENT_LOCAL"/*)
+        if [ ${#MOVE_ITEMS[@]} -gt 0 ]; then
+            $GUM_BIN spin --title "Movendo arquivos locais do sync..." -- mv "${MOVE_ITEMS[@]}" "$NEW_LOCAL/"
+        fi
+        shopt -u dotglob nullglob
+    fi
+
+    mkdir -p "$NEW_LOCAL"
+    set_remote_local_path "$REMOTE" "$NEW_LOCAL"
+
+    if [ "$HAS_MOUNT" -eq 1 ]; then
+        cat <<EOF > "$SYSTEMD_DIR/$MOUNT_UNIT"
+[Unit]
+Description=Mount $REMOTE
+After=graphical-session.target
+PartOf=graphical-session.target
+[Service]
+Type=notify
+ExecStartPre=%h/.local/bin/rclone-auto-wait-online
+ExecStart=$(readlink -f "$RCLONE_BIN") mount ${REMOTE}: "${NEW_LOCAL}" --vfs-cache-mode full --no-modtime
+ExecStop=fusermount3 -u "${NEW_LOCAL}"
+Restart=on-failure
+RestartSec=15
+[Install]
+WantedBy=graphical-session.target
+EOF
+    fi
+
+    if [ "$HAS_SYNC" -eq 1 ]; then
+        cat <<EOF > "$SYSTEMD_DIR/$SYNC_SERVICE"
+[Unit]
+Description=Sync $REMOTE
+[Service]
+Type=oneshot
+ExecStartPre=%h/.local/bin/rclone-auto-wait-online
+ExecStart=$(readlink -f "$RCLONE_BIN") bisync "${REMOTE}:" "${NEW_LOCAL}" --create-empty-src-dirs --compare size,modtime,checksum --slow-hash-sync-only --resync --verbose
+EOF
+
+        if [ "$HAS_TIMER" -eq 0 ]; then
+            cat <<EOF > "$SYSTEMD_DIR/$SYNC_TIMER"
+[Unit]
+Description=Timer 15m $REMOTE
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+[Install]
+WantedBy=timers.target
+EOF
+        fi
+    fi
+
+    systemctl --user daemon-reload
+
+    if [ "$HAS_MOUNT" -eq 1 ]; then
+        if [ "$MOUNT_ENABLED" -eq 1 ]; then
+            systemctl --user enable "$MOUNT_UNIT" >/dev/null 2>&1 || true
+        else
+            systemctl --user disable "$MOUNT_UNIT" >/dev/null 2>&1 || true
+        fi
+        if [ "$MOUNT_ACTIVE" -eq 1 ]; then
+            systemctl --user start "$MOUNT_UNIT" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [ "$HAS_SYNC" -eq 1 ]; then
+        if [ "$SYNC_ENABLED" -eq 1 ]; then
+            systemctl --user enable "$SYNC_TIMER" >/dev/null 2>&1 || true
+        else
+            systemctl --user disable "$SYNC_TIMER" >/dev/null 2>&1 || true
+        fi
+        if [ "$SYNC_ACTIVE" -eq 1 ]; then
+            systemctl --user start "$SYNC_TIMER" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    ui_success "Diretório de $REMOTE atualizado para: $NEW_LOCAL"
 }
 
 stop_all() {
@@ -927,7 +1336,7 @@ create_shortcuts() {
     LIST=$(systemctl --user list-unit-files | grep "rclone-mount-" | grep "enabled" | awk '{print $1}')
     for s in $LIST; do
         NAME=$(echo "$s" | sed 's/rclone-mount-//;s/.service//')
-        MOUNT_POINT="$CLOUD_DIR/$NAME"
+        MOUNT_POINT="$(get_remote_local_path "$NAME")"
         SHORTCUT="$HOME/Desktop/$NAME.desktop"
         echo -e "[Desktop Entry]\nName=$NAME\nExec=xdg-open \"$MOUNT_POINT\"\nIcon=$SYSTEM_ICON\nType=Application" > "$SHORTCUT"
         chmod +x "$SHORTCUT"
@@ -1015,6 +1424,14 @@ ALL (Outros / Listar Todos)
         ui_talk "Sucesso! Agora, como você quer usar essa nuvem?"
         ACTION=$(echo -e "MOUNT (Disco Virtual - Economiza espaço)\nSYNC (Backup Offline - Cópia segura)" | $GUM_BIN choose)
 
+        DEFAULT_LOCAL="$CLOUD_DIR/$NAME"
+        ui_talk "Agora escolha a pasta local desta conexão (padrão ou personalizada)."
+        if ! LOCAL_PATH=$(choose_local_path "$DEFAULT_LOCAL"); then
+            ui_talk "Operação cancelada."
+            "$RCLONE_BIN" config delete "$NAME" >/dev/null 2>&1 || true
+            return
+        fi
+
         ui_talk "Você quer que essa conexão inicie automaticamente junto com a sua sessão?"
         if $GUM_BIN confirm "Sim, iniciar automaticamente" --negative "Não, iniciar só quando eu mandar"; then
             AUTO_MODE="auto"
@@ -1023,9 +1440,9 @@ ALL (Outros / Listar Todos)
         fi
 
         if [[ "$ACTION" == MOUNT* ]]; then
-            setup_mount "$NAME" "$AUTO_MODE"
+            setup_mount "$NAME" "$AUTO_MODE" "$LOCAL_PATH"
         else
-            setup_sync "$NAME" "$AUTO_MODE"
+            setup_sync "$NAME" "$AUTO_MODE" "$LOCAL_PATH"
         fi
     else
         ui_error "Não consegui confirmar a criação. Tente novamente."
@@ -1064,9 +1481,10 @@ do_manage() {
     fi
 
     if [[ "$CHOICE" == *"Montado"* ]] || [[ "$CHOICE" == *"Sync"* ]]; then
-        ACTION=$(echo -e "📂 Abrir Pasta\n🌐 Abrir na Web\n🔴 Desconectar\n⚙️  Alternar Auto-start (atual: $AUTO_ENABLED)\n🔙 Voltar" | $GUM_BIN choose --header "Opções para $NAME")
+        ACTION=$(echo -e "📂 Abrir Pasta\n🗂️ Alterar Diretório Local\n🌐 Abrir na Web\n🔴 Desconectar\n⚙️  Alternar Auto-start (atual: $AUTO_ENABLED)\n🔙 Voltar" | $GUM_BIN choose --header "Opções para $NAME")
         case "$ACTION" in
-            "📂 Abrir"*) xdg-open "$CLOUD_DIR/$NAME" ;;
+            "📂 Abrir"*) xdg-open "$(get_remote_local_path "$NAME")" ;;
+            "🗂️ Alterar"*) change_remote_local_directory "$NAME" ;;
             "🌐 Abrir na Web"*) open_remote_in_browser "$NAME" ;;
             "🔴 Desconectar"*) if $GUM_BIN confirm "Tem certeza que deseja parar $NAME?"; then stop_all "$NAME"; fi ;;
             "⚙️  Alternar Auto-start"*)
@@ -1079,10 +1497,11 @@ do_manage() {
                 fi ;;
         esac
     else
-        ACTION=$(echo -e "🟢 Ativar (Mount)\n🔵 Ativar (Sync)\n🌐 Abrir na Web\n⚙️  Alternar Auto-start (atual: $AUTO_ENABLED)\n✏️  Renomear\n🗑️  Excluir\n🔙 Voltar" | $GUM_BIN choose --header "Opções para $NAME")
+        ACTION=$(echo -e "🟢 Ativar (Mount)\n🔵 Ativar (Sync)\n🗂️ Alterar Diretório Local\n🌐 Abrir na Web\n⚙️  Alternar Auto-start (atual: $AUTO_ENABLED)\n✏️  Renomear\n🗑️  Excluir\n🔙 Voltar" | $GUM_BIN choose --header "Opções para $NAME")
         case "$ACTION" in
-            "🟢 Ativar"*) setup_mount "$NAME" ;;
-            "🔵 Ativar"*) setup_sync "$NAME" ;;
+            "🟢 Ativar"*) setup_mount "$NAME" "manual" ;;
+            "🔵 Ativar"*) setup_sync "$NAME" "manual" ;;
+            "🗂️ Alterar"*) change_remote_local_directory "$NAME" ;;
             "🌐 Abrir na Web"*) open_remote_in_browser "$NAME" ;;
             "⚙️  Alternar Auto-start"*)
                 if [ "$AUTO_ENABLED" = "sim" ]; then
@@ -1094,7 +1513,7 @@ do_manage() {
                 fi ;;
             "🗑️  Excluir"*)
                 if $GUM_BIN confirm "Excluir configurações de $NAME permanentemente?"; then
-                    stop_all "$NAME"; "$RCLONE_BIN" config delete "$NAME"; ui_success "Removido.";
+                    stop_all "$NAME"; "$RCLONE_BIN" config delete "$NAME"; delete_remote_local_path "$NAME"; ui_success "Removido.";
                 fi ;;
             "✏️  Renomear"*)
                 ui_talk "Qual será o novo sufixo para $NAME?"
@@ -1103,7 +1522,15 @@ do_manage() {
                     TYPE=$(echo "$NAME" | cut -d- -f1); NEW_NAME="${TYPE}-${NEW_SUF}"; stop_all "$NAME"
                     CONF=$("$RCLONE_BIN" config file | grep ".conf" | tail -n1)
                     sed -i "s/^\[$NAME\]$/\[$NEW_NAME\]/" "$CONF"
-                    if [ -d "$CLOUD_DIR/$NAME" ]; then mv "$CLOUD_DIR/$NAME" "$CLOUD_DIR/$NEW_NAME"; fi
+                    OLD_LOCAL="$(get_remote_local_path "$NAME")"
+                    if [ "$OLD_LOCAL" = "$CLOUD_DIR/$NAME" ]; then
+                        NEW_LOCAL="$CLOUD_DIR/$NEW_NAME"
+                        if [ -d "$OLD_LOCAL" ]; then mv "$OLD_LOCAL" "$NEW_LOCAL"; fi
+                        set_remote_local_path "$NEW_NAME" "$NEW_LOCAL"
+                    else
+                        set_remote_local_path "$NEW_NAME" "$OLD_LOCAL"
+                    fi
+                    delete_remote_local_path "$NAME"
                     ui_success "Renomeado para $NEW_NAME"
                 fi ;;
         esac
