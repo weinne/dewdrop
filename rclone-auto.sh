@@ -20,6 +20,8 @@ USER_BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 SHORTCUT_DIR="$HOME/.local/share/applications"
 CLOUD_DIR="$HOME/Nuvem"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
+RCLONE_SOURCE_FILE="$CONFIG_DIR/rclone-source.conf"
 SYSTEM_ICON="folder-remote"
 
 CURRENT_PATH=$(readlink -f "$0")
@@ -27,11 +29,13 @@ SCRIPT_DIR=$(dirname "$CURRENT_PATH")
 TARGET_BIN="$USER_BIN_DIR/$APP_NAME"
 
 mkdir -p "$USER_BIN_DIR" "$SYSTEMD_DIR" "$CLOUD_DIR" "$SHORTCUT_DIR"
+mkdir -p "$CONFIG_DIR"
 export PATH="$USER_BIN_DIR:$PATH"
 
 # Binários
 RCLONE_BIN=""
 GUM_BIN=""
+RCLONE_SOURCE="auto"
 
 # --- 1. Inicialização ---
 
@@ -270,6 +274,223 @@ ensure_terminal() {
     fi
 }
 
+load_rclone_source_preference() {
+    if [ -f "$RCLONE_SOURCE_FILE" ]; then
+        SRC=$(tr -d '[:space:]' < "$RCLONE_SOURCE_FILE")
+        case "$SRC" in
+            package|binary|auto) RCLONE_SOURCE="$SRC" ;;
+            *) RCLONE_SOURCE="auto" ;;
+        esac
+    else
+        RCLONE_SOURCE="auto"
+    fi
+}
+
+save_rclone_source_preference() {
+    printf '%s\n' "$1" > "$RCLONE_SOURCE_FILE"
+    RCLONE_SOURCE="$1"
+}
+
+detect_package_installer() {
+    if command -v apt-get &> /dev/null; then echo "apt"; return 0; fi
+    if command -v dnf &> /dev/null; then echo "dnf"; return 0; fi
+    if command -v yum &> /dev/null; then echo "yum"; return 0; fi
+    if command -v zypper &> /dev/null; then echo "zypper"; return 0; fi
+    echo "none"
+}
+
+find_system_rclone() {
+    for p in /usr/bin/rclone /usr/local/bin/rclone /bin/rclone /snap/bin/rclone; do
+        if [ -x "$p" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+
+    if command -v rclone &> /dev/null; then
+        p=$(command -v rclone)
+        if [ "$p" != "$USER_BIN_DIR/rclone" ]; then
+            echo "$p"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+detect_effective_rclone_source() {
+    INSTALLER=$(detect_package_installer)
+    if [ "$RCLONE_SOURCE" = "package" ]; then
+        echo "package"
+        return 0
+    fi
+    if [ "$RCLONE_SOURCE" = "binary" ]; then
+        echo "binary"
+        return 0
+    fi
+
+    # auto: usa pacote em distros apt/rpm; em outras, binario local.
+    if [ "$INSTALLER" = "apt" ] || [ "$INSTALLER" = "dnf" ] || [ "$INSTALLER" = "yum" ] || [ "$INSTALLER" = "zypper" ]; then
+        echo "package"
+    else
+        echo "binary"
+    fi
+}
+
+install_rclone_from_package() {
+    INSTALLER=$(detect_package_installer)
+
+    case "$INSTALLER" in
+        apt)
+            sudo apt-get update && sudo apt-get install -y rclone
+            ;;
+        dnf)
+            sudo dnf install -y rclone
+            ;;
+        yum)
+            sudo yum install -y rclone
+            ;;
+        zypper)
+            sudo zypper --non-interactive install rclone
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+install_rclone_binary() {
+    rm -rf /tmp/rclone-auto-inst
+    mkdir -p /tmp/rclone-auto-inst
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) RCLONE_ARCH="amd64" ;;
+        aarch64|arm64) RCLONE_ARCH="arm64" ;;
+        *)
+            echo "Arquitetura não suportada para download automático do binário: $ARCH" >&2
+            return 1
+            ;;
+    esac
+
+    if ! curl -fL "https://downloads.rclone.org/rclone-current-linux-${RCLONE_ARCH}.zip" -o /tmp/rclone-auto-inst/rclone.zip; then
+        return 1
+    fi
+
+    unzip -q -o /tmp/rclone-auto-inst/rclone.zip -d /tmp/rclone-auto-inst
+    NEW_BIN=$(find /tmp/rclone-auto-inst -type f -name rclone | head -n1)
+    if [ -z "$NEW_BIN" ]; then
+        return 1
+    fi
+
+    mv "$NEW_BIN" "$USER_BIN_DIR/rclone"
+    chmod +x "$USER_BIN_DIR/rclone"
+    RCLONE_BIN="$USER_BIN_DIR/rclone"
+    return 0
+}
+
+ensure_rclone_bin() {
+    load_rclone_source_preference
+    EFFECTIVE_SOURCE=$(detect_effective_rclone_source)
+
+    if [ "$EFFECTIVE_SOURCE" = "package" ]; then
+        if SYS_RCLONE=$(find_system_rclone); then
+            RCLONE_BIN="$SYS_RCLONE"
+            return 0
+        fi
+
+        if install_rclone_from_package; then
+            if SYS_RCLONE=$(find_system_rclone); then
+                RCLONE_BIN="$SYS_RCLONE"
+                return 0
+            fi
+        fi
+
+        # Em modo auto, ainda permitimos fallback para binário quando o pacote falha.
+        if [ "$RCLONE_SOURCE" = "auto" ]; then
+            if install_rclone_binary; then
+                return 0
+            fi
+        fi
+
+        return 1
+    fi
+
+    if [ -x "$USER_BIN_DIR/rclone" ]; then
+        RCLONE_BIN="$USER_BIN_DIR/rclone"
+        return 0
+    fi
+
+    if install_rclone_binary; then
+        return 0
+    fi
+
+    return 1
+}
+
+show_rclone_source_menu() {
+    load_rclone_source_preference
+    EFFECTIVE_SOURCE=$(detect_effective_rclone_source)
+    INSTALLER=$(detect_package_installer)
+
+    if [ "$EFFECTIVE_SOURCE" = "package" ]; then
+        CURRENT_LABEL="Pacote do sistema"
+    else
+        CURRENT_LABEL="Binário local (~/.local/bin)"
+    fi
+
+    ui_talk "Fonte atual do Rclone: $CURRENT_LABEL"
+
+    CHOICE=$(echo -e "📦 Usar pacote do sistema\n🧩 Usar binário local\n🔙 Voltar" | $GUM_BIN choose --header "Fonte do Rclone")
+
+    case "$CHOICE" in
+        "📦"*)
+            if [ "$INSTALLER" = "none" ]; then
+                ui_error "Não detectei apt/rpm (dnf/yum/zypper) neste sistema. Não dá para usar pacote aqui."
+                return
+            fi
+
+            if install_rclone_from_package; then
+                save_rclone_source_preference "package"
+                if SYS_RCLONE=$(find_system_rclone); then
+                    RCLONE_BIN="$SYS_RCLONE"
+                fi
+                ui_success "Rclone configurado para usar o pacote do sistema."
+            else
+                ui_error "Falha ao instalar rclone via pacote."
+            fi
+            ;;
+        "🧩"*)
+            if install_rclone_binary; then
+                save_rclone_source_preference "binary"
+                ui_success "Rclone configurado para usar binário local."
+            else
+                ui_error "Falha ao instalar/atualizar o binário local do rclone."
+            fi
+            ;;
+    esac
+}
+
+run_fix_existing_services() {
+    FIXER_BIN="$USER_BIN_DIR/rclone-auto-fix-services"
+    FIXER_LOCAL="$SCRIPT_DIR/fix-existing-services.sh"
+
+    if [ -x "$FIXER_BIN" ]; then
+        bash "$FIXER_BIN"
+    elif [ -x "$FIXER_LOCAL" ]; then
+        bash "$FIXER_LOCAL"
+    else
+        ui_error "Script de correção não encontrado. Reinstale o rclone-auto."
+        return
+    fi
+
+    if [ $? -eq 0 ]; then
+        ui_success "Correção de serviços concluída."
+    else
+        ui_error "A correção encontrou erros."
+    fi
+}
+
 bootstrap_gum() {
     if [ -f "$SCRIPT_DIR/gum" ] && [ -x "$SCRIPT_DIR/gum" ]; then GUM_BIN="$SCRIPT_DIR/gum"
     elif [ -f "$USER_BIN_DIR/gum" ]; then GUM_BIN="$USER_BIN_DIR/gum"
@@ -315,16 +536,14 @@ check_deps_splash() {
     fi
     sleep 0.1
 
-    if [ -f "$USER_BIN_DIR/rclone" ]; then RCLONE_BIN="$USER_BIN_DIR/rclone"; elif command -v rclone &> /dev/null; then RCLONE_BIN=$(command -v rclone); fi
-
-    if [ -z "$RCLONE_BIN" ]; then
-        $GUM_BIN spin --title "Baixando Rclone Core..." -- curl -L https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
-        unzip -q -o /tmp/rclone.zip -d /tmp/inst
-        mv /tmp/inst/rclone-*-linux-amd64/rclone "$USER_BIN_DIR/"
-        chmod +x "$USER_BIN_DIR/rclone"
-        RCLONE_BIN="$USER_BIN_DIR/rclone"
+    if ensure_rclone_bin; then
+        check_step "true" "Rclone Core"
+    else
+        check_step "false" "Rclone Core"
+        echo "⚠️  Erro Crítico: não consegui preparar o rclone (pacote/binário)."
+        read -p "Enter para sair..."
+        exit 1
     fi
-    check_step "true" "Rclone Core"
     sleep 0.1
 
     check_step "true" "Graphic UI (Gum)"
@@ -334,6 +553,7 @@ check_deps_splash() {
 install_system() {
     if [ -f "$CURRENT_PATH" ] && [ "$CURRENT_PATH" != "$TARGET_BIN" ]; then cp -f "$CURRENT_PATH" "$TARGET_BIN"; chmod +x "$TARGET_BIN"; fi
     if [ "$GUM_BIN" == "$SCRIPT_DIR/gum" ] && [ ! -f "$USER_BIN_DIR/gum" ]; then cp "$SCRIPT_DIR/gum" "$USER_BIN_DIR/"; chmod +x "$USER_BIN_DIR/gum"; fi
+    if [ -f "$SCRIPT_DIR/fix-existing-services.sh" ]; then cp -f "$SCRIPT_DIR/fix-existing-services.sh" "$USER_BIN_DIR/rclone-auto-fix-services"; chmod +x "$USER_BIN_DIR/rclone-auto-fix-services"; fi
 
     # Helper: espera internet antes de iniciar mounts/syncs (usado via ExecStartPre nos units).
     cat <<'EOF' > "$USER_BIN_DIR/rclone-auto-wait-online"
@@ -415,6 +635,173 @@ ui_talk() {
 ui_success() { $GUM_BIN style --foreground 46 "✅ $1"; sleep 1.5; }
 ui_error() { $GUM_BIN style --foreground 196 "❌ $1"; $GUM_BIN confirm "Ok" --affirmative "Entendi" --negative ""; }
 
+diag_result() {
+    OK="$1"
+    MSG="$2"
+    DETAIL="${3:-}"
+
+    if [ "$OK" -eq 0 ]; then
+        $GUM_BIN style --foreground 46 "✓ $MSG"
+    else
+        $GUM_BIN style --foreground 196 "✗ $MSG"
+        if [ -n "$DETAIL" ]; then
+            $GUM_BIN style --foreground 214 "  $DETAIL"
+        fi
+    fi
+}
+
+test_remote_health() {
+    REMOTE="$1"
+    MODE="$2"
+
+    ui_talk "Executando teste rápido para '$REMOTE' ($MODE)..."
+
+    FAIL=0
+
+    if [ ! -x "$USER_BIN_DIR/rclone-auto-wait-online" ]; then
+        diag_result 1 "Helper de rede ausente" "Esperado em: $USER_BIN_DIR/rclone-auto-wait-online"
+        FAIL=1
+    else
+        diag_result 0 "Helper de rede presente"
+    fi
+
+    if [ "$MODE" = "mount" ]; then
+        UNIT="rclone-mount-${REMOTE}.service"
+        if systemctl --user is-active --quiet "$UNIT"; then
+            diag_result 0 "Serviço mount ativo"
+        else
+            diag_result 1 "Serviço mount não está ativo" "Use: systemctl --user status $UNIT"
+            FAIL=1
+        fi
+    else
+        UNIT="rclone-sync-${REMOTE}.timer"
+        if systemctl --user is-active --quiet "$UNIT"; then
+            diag_result 0 "Timer de sync ativo"
+        else
+            diag_result 1 "Timer de sync não está ativo" "Use: systemctl --user status $UNIT"
+            FAIL=1
+        fi
+    fi
+
+    if "$RCLONE_BIN" lsd "${REMOTE}:" --max-depth 0 >/dev/null 2>&1; then
+        diag_result 0 "Acesso ao remoto confirmado"
+    else
+        diag_result 1 "Falha ao acessar remoto" "Pode ser token expirado, rede ou configuração do remoto."
+        FAIL=1
+    fi
+
+    if [ "$FAIL" -eq 0 ]; then
+        ui_success "Teste rápido concluído sem falhas."
+    else
+        ui_error "Teste rápido detectou problemas em '$REMOTE'."
+    fi
+}
+
+run_full_diagnostic() {
+    ui_talk "Executando diagnóstico completo do ambiente e serviços..."
+
+    FAILS=0
+    MOUNT_UNITS=0
+    SYNC_UNITS=0
+
+    if command -v systemctl >/dev/null 2>&1; then
+        diag_result 0 "systemctl disponível"
+    else
+        diag_result 1 "systemctl não encontrado"
+        FAILS=$((FAILS+1))
+    fi
+
+    if systemctl --user show-environment >/dev/null 2>&1; then
+        diag_result 0 "systemd --user acessível"
+    else
+        diag_result 1 "systemd --user inacessível" "Abra o script em uma sessão de usuário com systemd --user ativo."
+        FAILS=$((FAILS+1))
+    fi
+
+    if [ -x "$RCLONE_BIN" ]; then
+        diag_result 0 "rclone detectado" "$RCLONE_BIN"
+    else
+        diag_result 1 "rclone não encontrado" "Defina a fonte do rclone em Ferramentas."
+        FAILS=$((FAILS+1))
+    fi
+
+    if [ -x "$GUM_BIN" ]; then
+        diag_result 0 "gum detectado" "$GUM_BIN"
+    else
+        diag_result 1 "gum não encontrado"
+        FAILS=$((FAILS+1))
+    fi
+
+    if command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1; then
+        diag_result 0 "FUSE disponível"
+    else
+        diag_result 1 "FUSE indisponível" "Instale fuse3 para mounts funcionarem."
+        FAILS=$((FAILS+1))
+    fi
+
+    if [ -x "$USER_BIN_DIR/rclone-auto-wait-online" ]; then
+        diag_result 0 "Helper de rede presente"
+    else
+        diag_result 1 "Helper de rede ausente"
+        FAILS=$((FAILS+1))
+    fi
+
+    REMOTES=$("$RCLONE_BIN" listremotes 2>/dev/null | sed 's/:$//')
+    if [ -n "$REMOTES" ]; then
+        diag_result 0 "Remotos configurados detectados"
+    else
+        diag_result 1 "Nenhum remoto configurado"
+    fi
+
+    for unit_path in "$SYSTEMD_DIR"/rclone-mount-*.service; do
+        [ -f "$unit_path" ] || continue
+        MOUNT_UNITS=$((MOUNT_UNITS+1))
+        unit_name=$(basename "$unit_path")
+        remote="${unit_name#rclone-mount-}"
+        remote="${remote%.service}"
+
+        if grep -q "StartLimitIntervalSec" "$unit_path"; then
+            diag_result 1 "$unit_name contém chave legada incompatível" "Rode: Ferramentas -> Corrigir Serviços Existentes"
+            FAILS=$((FAILS+1))
+        fi
+
+        if grep -q "^ExecStop=/bin/fusermount" "$unit_path"; then
+            diag_result 1 "$unit_name usa ExecStop legado (/bin/fusermount)" "Rode: Ferramentas -> Corrigir Serviços Existentes"
+            FAILS=$((FAILS+1))
+        fi
+
+        if ! "$RCLONE_BIN" listremotes 2>/dev/null | grep -q "^${remote}:"; then
+            diag_result 1 "$unit_name aponta para remoto inexistente" "$remote"
+            FAILS=$((FAILS+1))
+        fi
+
+        if systemctl --user is-enabled --quiet "$unit_name" 2>/dev/null && ! systemctl --user is-active --quiet "$unit_name" 2>/dev/null; then
+            diag_result 1 "$unit_name está enabled mas inativo" "Verifique: systemctl --user status $unit_name"
+            FAILS=$((FAILS+1))
+        fi
+    done
+
+    for unit_path in "$SYSTEMD_DIR"/rclone-sync-*.timer; do
+        [ -f "$unit_path" ] || continue
+        SYNC_UNITS=$((SYNC_UNITS+1))
+        unit_name=$(basename "$unit_path")
+
+        if systemctl --user is-enabled --quiet "$unit_name" 2>/dev/null && ! systemctl --user is-active --quiet "$unit_name" 2>/dev/null; then
+            diag_result 1 "$unit_name está enabled mas inativo" "Verifique: systemctl --user status $unit_name"
+            FAILS=$((FAILS+1))
+        fi
+    done
+
+    $GUM_BIN style --foreground 212 ""
+    $GUM_BIN style --foreground 212 "Resumo: mounts=$MOUNT_UNITS, timers=$SYNC_UNITS, falhas=$FAILS"
+
+    if [ "$FAILS" -eq 0 ]; then
+        ui_success "Diagnóstico concluído. Tudo certo."
+    else
+        ui_error "Diagnóstico concluído com falhas. Use Ferramentas -> Corrigir Serviços Existentes e revise os status."
+    fi
+}
+
 # --- 3. Lógica Core ---
 
 setup_sync() {
@@ -446,6 +833,7 @@ EOF
     fi
     $GUM_BIN spin --title "Sincronizando arquivos..." -- systemctl --user start "rclone-sync-${REMOTE}.service"
     ui_success "Pronto! A pasta $REMOTE está sincronizada."
+    test_remote_health "$REMOTE" "sync"
 }
 
 setup_mount() {
@@ -460,10 +848,9 @@ PartOf=graphical-session.target
 Type=notify
 ExecStartPre=%h/.local/bin/rclone-auto-wait-online
 ExecStart=$(readlink -f "$RCLONE_BIN") mount ${REMOTE}: "${LOCAL}" --vfs-cache-mode full --no-modtime
-ExecStop=/bin/fusermount -u "${LOCAL}"
+ExecStop=fusermount3 -u "${LOCAL}"
 Restart=on-failure
 RestartSec=15
-StartLimitIntervalSec=0
 [Install]
 WantedBy=graphical-session.target
 EOF
@@ -477,6 +864,7 @@ EOF
     if systemctl --user is-active --quiet "rclone-mount-${REMOTE}.service"; then
         if [ -d "$CLOUD_DIR" ]; then echo -e "[Desktop Entry]\nIcon=$SYSTEM_ICON\nType=Directory" > "$CLOUD_DIR/.directory" 2>/dev/null; fi
         ui_success "Conectado! Acesso disponível na pasta Nuvem."
+        test_remote_health "$REMOTE" "mount"
     else
         ui_error "Houve um erro ao montar o disco."
     fi
@@ -515,11 +903,23 @@ open_remote_in_browser() {
 # --- 4. Ferramentas Globais ---
 
 update_binaries() {
-    $GUM_BIN spin --title "Atualizando Rclone..." -- curl -L https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
-    unzip -q -o /tmp/rclone.zip -d /tmp/inst
-    mv /tmp/inst/rclone-*-linux-amd64/rclone "$USER_BIN_DIR/"
-    chmod +x "$USER_BIN_DIR/rclone"
-    ui_success "Sistema atualizado!"
+    load_rclone_source_preference
+    EFFECTIVE_SOURCE=$(detect_effective_rclone_source)
+
+    if [ "$EFFECTIVE_SOURCE" = "package" ]; then
+        if install_rclone_from_package; then
+            if SYS_RCLONE=$(find_system_rclone); then RCLONE_BIN="$SYS_RCLONE"; fi
+            ui_success "Rclone via pacote atualizado."
+        else
+            ui_error "Falha ao atualizar rclone via pacote."
+        fi
+    else
+        if install_rclone_binary; then
+            ui_success "Rclone binário atualizado."
+        else
+            ui_error "Falha ao atualizar rclone binário."
+        fi
+    fi
 }
 
 create_shortcuts() {
@@ -542,11 +942,14 @@ fix_icons() {
 
 do_global_tools() {
     ui_talk "Aqui estão algumas ferramentas para manter tudo em ordem."
-    CHOICE=$(echo -e "🖥️  Criar Atalhos no Desktop\n🎨 Corrigir Ícones\n⬇️  Atualizar Tudo\n♻️  Reinstalar Script\n🔙 Voltar" | $GUM_BIN choose --header "Ferramentas")
+    CHOICE=$(echo -e "🖥️  Criar Atalhos no Desktop\n🎨 Corrigir Ícones\n🧪 Testar Configuração\n🩹 Corrigir Serviços Existentes\n⚙️  Fonte do Rclone (pacote/binário)\n⬇️  Atualizar Tudo\n♻️  Reinstalar Script\n🔙 Voltar" | $GUM_BIN choose --header "Ferramentas")
 
     case "$CHOICE" in
         "🖥️"*) create_shortcuts ;;
         "🎨"*) fix_icons ;;
+        "🧪"*) run_full_diagnostic ;;
+        "🩹"*) run_fix_existing_services ;;
+        "⚙️"*) show_rclone_source_menu ;;
         "⬇️"*) update_binaries ;;
         "♻️"*) install_system; ui_success "Script reinstalado com sucesso." ;;
     esac

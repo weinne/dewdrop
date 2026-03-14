@@ -4,6 +4,7 @@ set -euo pipefail
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 USER_BIN_DIR="$HOME/.local/bin"
 HELPER="$USER_BIN_DIR/rclone-auto-wait-online"
+UNMOUNT_CMD=""
 
 log() { printf '%s\n' "$*"; }
 
@@ -54,6 +55,20 @@ require_systemctl_user() {
   fi
 }
 
+detect_unmount_cmd() {
+  if command -v fusermount3 >/dev/null 2>&1; then
+    UNMOUNT_CMD="fusermount3"
+    return 0
+  fi
+  if command -v fusermount >/dev/null 2>&1; then
+    UNMOUNT_CMD="fusermount"
+    return 0
+  fi
+
+  log "Aviso: fusermount/fusermount3 não encontrado. O ExecStop será preservado quando possível."
+  UNMOUNT_CMD=""
+}
+
 backup_file() {
   local file="$1"
   local ts
@@ -78,7 +93,17 @@ fix_mount_unit() {
   fi
 
   if [[ -z "$execstop" ]]; then
-    execstop="fusermount3 -u \"%h/Nuvem/${remote}\""
+    if [[ -n "$UNMOUNT_CMD" ]]; then
+      execstop="${UNMOUNT_CMD} -u \"%h/Nuvem/${remote}\""
+    fi
+  elif [[ -n "$UNMOUNT_CMD" ]]; then
+    # Normaliza ExecStop antigo (/bin/fusermount) para o comando detectado no sistema.
+    execstop="${UNMOUNT_CMD} -u \"%h/Nuvem/${remote}\""
+  fi
+
+  if [[ -z "$execstop" ]]; then
+    log "- Pulando $unit_name (sem ExecStop= e sem fusermount disponível)"
+    return 0
   fi
 
   backup_file "$unit_path"
@@ -96,7 +121,6 @@ ExecStart=${execstart}
 ExecStop=${execstop}
 Restart=on-failure
 RestartSec=15
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=graphical-session.target
@@ -160,6 +184,7 @@ main() {
   fi
 
   ensure_helper
+  detect_unmount_cmd
 
   log "Corrigindo units em: $SYSTEMD_DIR"
 

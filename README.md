@@ -15,7 +15,9 @@
 ## ✨ Main Features
 
 - **🎨 Modern TUI (Gum)**: Navigable menus, search filters, loading spinners and clear confirmations.
-- **🚀 Smart Auto‑Install**: Automatically detects and downloads dependencies (`rclone` and `gum`) if they are not installed.
+- **🚀 Smart Auto‑Install**: Automatically prepares dependencies (`rclone` and `gum`) with source selection support.
+- **📦 Package‑First Rclone (Auto Mode)**: On `apt`/RPM-based systems (`dnf`, `yum`, `zypper`), `rclone` is installed from system packages first.
+- **🧩 Binary Fallback**: If package installation is unavailable (or on non-`apt`/RPM systems), the script uses a local binary in `~/.local/bin`.
 - **📦 Portable / Offline Friendly**: Supports bundled binaries so you can run it on machines without prior installation.
 - **⚡ Two operation modes**:
   - **Mount**: Turns the cloud into a virtual drive (on‑demand access, minimal local space).
@@ -28,7 +30,7 @@
 
 ## 📦 Installation
 
-You don’t need to pre‑install `rclone` or `gum`. The script will bootstrap what is missing inside your home directory.
+You don’t need to pre‑install `rclone` or `gum`. The script bootstraps what is missing and can choose between package-managed or local-binary `rclone`.
 
 ### Quick Method (Online)
 
@@ -51,7 +53,7 @@ To create a bundle that works on machines with limited internet or no admin righ
 2. Place it in the same directory as the script (or in a small `bin/` next to it).
 3. The script will automatically detect the local binary and skip the download.
 
-> **Note**: By default, `rclone` is downloaded for Linux `amd64`. For other architectures you may need to adjust the download URL and logic in the script.
+> **Note**: Binary installs now detect architecture (`amd64` / `arm64`) automatically.
 
 ---
 
@@ -91,7 +93,12 @@ rclone-auto
 3. **🛠️ Tools**
    - **Create Desktop Shortcuts** for all active mounts (one `.desktop` file per remote).
    - **Fix Folder Icons** by regenerating a `.directory` file for the main cloud folder.
-   - **Update Rclone** by downloading the latest Linux `amd64` build into `~/.local/bin`.
+  - **Test Configuration** to run a full health check (dependencies, units, remotes, enabled/inactive services).
+  - **Fix Existing Services** with an in-app shortcut that updates legacy `systemd --user` units.
+  - **Rclone Source (package/binary)** to switch between package-managed `rclone` and local binary.
+  - **Update Rclone** honoring your selected source:
+    - package mode: updates via package manager.
+    - binary mode: updates local binary in `~/.local/bin`.
    - **Reinstall Script** into `~/.local/bin/rclone-auto` and refresh the app launcher entry.
 
 4. **🔧 Advanced Configuration**
@@ -115,6 +122,7 @@ rclone-auto
 - Mount auto-start is now tied to the **graphical session** (via `graphical-session.target`).
 - Mounts and sync runs wait for **internet** before starting (via an `ExecStartPre` helper).
 - Internet check is **fail-fast + retry** (short timeout), so it does not block boot/login for long when network is still coming up.
+- A **quick automatic test** runs after each new service activation (mount/sync) to validate runtime health.
 
 If you created services with an older version, run the fixer script once:
 
@@ -123,9 +131,14 @@ chmod +x fix-existing-services.sh
 ./fix-existing-services.sh
 ```
 
+Or run it from the app menu:
+
+- `Tools` → `Fix Existing Services`
+
 - **Core script behavior**
   - Ensures it is running in a real terminal (`ensure_terminal`).
-  - Bootstraps `gum` and `rclone` if binaries are missing.
+  - Bootstraps `gum` and `rclone` using selectable source logic (`package` or `binary`).
+  - Persists rclone source preference in `~/.config/rclone-auto/rclone-source.conf`.
   - Installs itself into `~/.local/bin/rclone-auto` and creates a `.desktop` launcher.
   - Centralizes all cloud folders under:
     - `~/Nuvem/<remote-name>`
@@ -147,6 +160,7 @@ chmod +x fix-existing-services.sh
 
 - **Operating System**: Linux (Ubuntu, Debian, Fedora, Arch, etc.)
 - **System tools**: `bash`, `curl`, `unzip`, `systemd --user` enabled.
+- **Optional admin rights**: Needed only when choosing package-managed `rclone` (uses `sudo`).
 - **FUSE**: `fuse3` / `fusermount3` must be available for mounts to work.
 - **Internet access**: Required on first run to download `rclone` and `gum`, unless you bundle binaries locally.
 
