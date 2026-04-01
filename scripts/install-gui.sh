@@ -7,17 +7,82 @@ GUI_DIR="$ROOT_DIR/gui"
 WAILS_BUILD_TAGS="${WAILS_BUILD_TAGS:-}"
 RELEASE_REPO="${RELEASE_REPO:-weinne/dewdrop}"
 RELEASE_TAG="${RELEASE_TAG:-latest}"
+INSTALL_GUI_ALREADY_IN_TERMINAL="${INSTALL_GUI_ALREADY_IN_TERMINAL:-0}"
+
+if [[ -t 1 ]]; then
+  COLOR_BLUE='\033[1;34m'
+  COLOR_GREEN='\033[1;32m'
+  COLOR_YELLOW='\033[1;33m'
+  COLOR_RED='\033[1;31m'
+  COLOR_RESET='\033[0m'
+else
+  COLOR_BLUE=''
+  COLOR_GREEN=''
+  COLOR_YELLOW=''
+  COLOR_RED=''
+  COLOR_RESET=''
+fi
 
 set_root_dir() {
   ROOT_DIR="$1"
   GUI_DIR="$ROOT_DIR/gui"
 }
 
+log_step() {
+  echo -e "${COLOR_BLUE}==>${COLOR_RESET} $*"
+}
+
+log_ok() {
+  echo -e "${COLOR_GREEN}✓${COLOR_RESET} $*"
+}
+
+log_warn() {
+  echo -e "${COLOR_YELLOW}!${COLOR_RESET} $*"
+}
+
+log_err() {
+  echo -e "${COLOR_RED}Erro:${COLOR_RESET} $*" >&2
+}
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Erro: comando '$1' não encontrado." >&2
+    log_err "comando '$1' não encontrado."
     exit 1
   fi
+}
+
+launch_in_terminal_if_needed() {
+  if [[ "$INSTALL_GUI_ALREADY_IN_TERMINAL" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ -t 0 && -t 1 ]]; then
+    return 0
+  fi
+
+  local script_path
+  script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+  local -a term_cmds=(
+    "x-terminal-emulator -e"
+    "konsole -e"
+    "gnome-terminal --"
+    "xfce4-terminal -e"
+    "xterm -e"
+  )
+
+  local cmd
+  for cmd in "${term_cmds[@]}"; do
+    local bin
+    bin="${cmd%% *}"
+    if command -v "$bin" >/dev/null 2>&1; then
+      log_step "Sem TTY detectado; abrindo terminal automaticamente..."
+      # shellcheck disable=SC2086
+      eval "$cmd" env INSTALL_GUI_ALREADY_IN_TERMINAL=1 bash "$script_path" "$@"
+      exit 0
+    fi
+  done
+
+  log_warn "Sem TTY e nenhum terminal compatível encontrado. Continuando no contexto atual."
 }
 
 install_deps_apt() {
@@ -57,7 +122,7 @@ resolve_release_tag() {
   tag="$(curl -fsSL "https://api.github.com/repos/${RELEASE_REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 
   if [[ -z "$tag" ]]; then
-    echo "Erro: não foi possível descobrir a última release de ${RELEASE_REPO}." >&2
+    log_err "não foi possível descobrir a última release de ${RELEASE_REPO}."
     exit 1
   fi
 
@@ -71,7 +136,7 @@ download_release_asset() {
 
   require_cmd curl
   local url="https://github.com/${RELEASE_REPO}/releases/download/${release_tag}/${file_name}"
-  echo "Baixando $file_name de $url"
+  log_step "Baixando $file_name"
   curl -fL "$url" -o "$out_file"
 }
 
@@ -98,12 +163,12 @@ install_from_release_package() {
       sudo dnf install -y "$temp_dir/$rpm_name"
       ;;
     *)
-      echo "Erro: instalação por pacote não suportada para o gerenciador '$manager'." >&2
+      log_err "instalação por pacote não suportada para o gerenciador '$manager'."
       exit 1
       ;;
   esac
 
-  echo "Instalação concluída via pacote da release ${release_tag}. Rode: rclone-auto-gui"
+  log_ok "Instalação concluída via pacote da release ${release_tag}. Rode: rclone-auto-gui"
 }
 
 build_from_release_source() {
@@ -120,14 +185,14 @@ build_from_release_source() {
   local tarball_url="https://github.com/${RELEASE_REPO}/archive/refs/tags/${release_tag}.tar.gz"
   local tarball_path="$temp_dir/source.tar.gz"
 
-  echo "Baixando código-fonte da release ${release_tag}..."
+  log_step "Baixando código-fonte da release ${release_tag}..."
   curl -fL "$tarball_url" -o "$tarball_path"
   tar -xzf "$tarball_path" -C "$temp_dir"
 
   local extracted
   extracted="$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
   if [[ -z "$extracted" ]]; then
-    echo "Erro: não foi possível extrair o código-fonte da release ${release_tag}." >&2
+    log_err "não foi possível extrair o código-fonte da release ${release_tag}."
     exit 1
   fi
 
@@ -136,16 +201,16 @@ build_from_release_source() {
   install_system_deps
   install_go_if_missing
 
-  echo "Compilando aplicação GUI a partir da release ${release_tag}..."
+  log_step "Compilando aplicação GUI a partir da release ${release_tag}..."
   build_gui_binary
 
-  echo "Instalando binário em /usr/local/bin..."
+  log_step "Instalando binário em /usr/local/bin..."
   sudo install -Dm755 "$GUI_DIR/rclone-auto-gui" /usr/local/bin/rclone-auto-gui
 
-  echo "Instalando atalho desktop..."
+  log_step "Instalando atalho desktop..."
   sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
 
-  echo "Instalação concluída por build da release ${release_tag}. Rode: rclone-auto-gui"
+  log_ok "Instalação concluída por build da release ${release_tag}. Rode: rclone-auto-gui"
 }
 
 detect_webkit_tag() {
@@ -182,7 +247,7 @@ install_go_if_missing() {
     return
   fi
 
-  echo "Go não encontrado. Instalando Go local em ~/.local/go..."
+  log_step "Go não encontrado. Instalando Go local em ~/.local/go..."
   require_cmd curl
   require_cmd tar
 
@@ -204,7 +269,7 @@ install_system_deps() {
   elif command -v pacman >/dev/null 2>&1; then
     install_deps_pacman
   else
-    echo "Erro: gerenciador de pacotes não suportado automaticamente." >&2
+    log_err "gerenciador de pacotes não suportado automaticamente."
     exit 1
   fi
 }
@@ -232,15 +297,15 @@ build_gui_binary() {
   for candidate in "${tag_candidates[@]}"; do
     local go_tags
     go_tags="$(normalize_go_tags "$candidate")"
-    echo "Tentando compilar com tags Go: $go_tags"
+    log_step "Tentando compilar com tags Go: $go_tags"
     if go build -tags "$go_tags" -o rclone-auto-gui .; then
-      echo "Build concluido com tags: $go_tags"
+      log_ok "Build concluído com tags: $go_tags"
       return 0
     fi
     last_candidate="$go_tags"
   done
 
-  echo "Erro: não foi possível compilar com nenhuma tag Wails suportada." >&2
+  log_err "não foi possível compilar com nenhuma tag Wails suportada."
   echo "Tentativas: ${tag_candidates[*]}" >&2
   echo "Dica: exporte WAILS_BUILD_TAGS manualmente e rode de novo." >&2
   echo "Exemplo: WAILS_BUILD_TAGS=production,webkit2_41 ./scripts/install-gui.sh" >&2
@@ -272,6 +337,7 @@ main() {
     return 0
   fi
 
+  launch_in_terminal_if_needed "$@"
   require_cmd bash
 
   if in_repo_layout; then
@@ -279,20 +345,20 @@ main() {
     install_go_if_missing
 
     if ! command -v go >/dev/null 2>&1; then
-      echo "Erro: Go não disponível após tentativa de instalação." >&2
+      log_err "Go não disponível após tentativa de instalação."
       exit 1
     fi
 
-    echo "Compilando aplicação GUI..."
+    log_step "Compilando aplicação GUI..."
     build_gui_binary
 
-    echo "Instalando binário em /usr/local/bin..."
+    log_step "Instalando binário em /usr/local/bin..."
     sudo install -Dm755 "$GUI_DIR/rclone-auto-gui" /usr/local/bin/rclone-auto-gui
 
-    echo "Instalando atalho desktop..."
+    log_step "Instalando atalho desktop..."
     sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
 
-    echo "Instalação concluída. Rode: rclone-auto-gui"
+    log_ok "Instalação concluída. Rode: rclone-auto-gui"
     return 0
   fi
 
@@ -311,7 +377,7 @@ main() {
     return 0
   fi
 
-  echo "Erro: não foi possível determinar um método de instalação para esta distro." >&2
+  log_err "não foi possível determinar um método de instalação para esta distro."
   exit 1
 }
 
