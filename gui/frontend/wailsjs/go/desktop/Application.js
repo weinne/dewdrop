@@ -6,6 +6,10 @@ export function CreateCloudRemote(arg1, arg2) {
   return window['go']['desktop']['Application']['CreateCloudRemote'](arg1, arg2);
 }
 
+export function DeleteCloudRemote(arg1) {
+  return window['go']['desktop']['Application']['DeleteCloudRemote'](arg1);
+}
+
 export function ExecuteAction(arg1, arg2) {
   return window['go']['desktop']['Application']['ExecuteAction'](arg1, arg2);
 }

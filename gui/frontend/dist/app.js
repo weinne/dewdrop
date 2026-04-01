@@ -1034,6 +1034,35 @@ function openRemoteSettings(remoteName, snapshot = currentSnapshot) {
     }),
   );
 
+  const deleteAccountBtn = document.createElement("button");
+  deleteAccountBtn.className = "action-btn danger";
+  deleteAccountBtn.textContent = "Deletar conta (remover do rclone)";
+  deleteAccountBtn.addEventListener("click", async () => {
+    if (!window.go || !window.go.desktop || !window.go.desktop.Application) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Isso vai remover os serviços e deletar a conta do rclone. Você precisará conectar novamente depois. Deseja continuar?",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await window.go.desktop.Application.DeleteCloudRemote(remoteName);
+      currentRemoteSettings = "";
+      remoteSettingsModal.classList.add("hidden");
+      clearDiagnosticsOutput();
+      await refreshSnapshot();
+      showToast("Conta deletada. Você pode conectar novamente.");
+    } catch (err) {
+      console.error(err);
+      showToast(extractErrorMessage(err, "Não foi possível deletar a conta."), true);
+    }
+  });
+  recovery.actions.appendChild(deleteAccountBtn);
+
   advancedActionsContainer.appendChild(operation.section);
   advancedActionsContainer.appendChild(automation.section);
   advancedActionsContainer.appendChild(utilities.section);

@@ -146,6 +146,43 @@ func (a *Application) CreateCloudRemote(remoteName string, provider string) (cor
 	return core.ActionResult{OK: true, Message: "account connected"}, nil
 }
 
+func (a *Application) DeleteCloudRemote(remoteName string) (core.ActionResult, error) {
+	remoteName = strings.TrimSpace(remoteName)
+	if remoteName == "" {
+		return core.ActionResult{}, errors.New("remote name is required")
+	}
+
+	errList := make([]string, 0, 2)
+
+	if _, err := a.api.Action(context.Background(), core.ActionRequest{Type: core.ActionRemoveService, Remote: remoteName}); err != nil {
+		errList = append(errList, fmt.Sprintf("remove service: %v", err))
+	}
+
+	rcloneBin, err := resolveRcloneBinary()
+	if err != nil {
+		errList = append(errList, err.Error())
+	} else {
+		cmd := exec.Command(rcloneBin, "config", "delete", remoteName)
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			output := strings.TrimSpace(string(out))
+			if !isMissingRemoteError(output) {
+				if output == "" {
+					errList = append(errList, fmt.Sprintf("delete remote: %v", runErr))
+				} else {
+					errList = append(errList, fmt.Sprintf("delete remote: %v: %s", runErr, output))
+				}
+			}
+		}
+	}
+
+	if len(errList) > 0 {
+		return core.ActionResult{}, errors.New(strings.Join(errList, "; "))
+	}
+
+	return core.ActionResult{OK: true, Message: "account deleted"}, nil
+}
+
 type rcloneConfigPrompt struct {
 	State  string             `json:"State"`
 	Option rcloneConfigOption `json:"Option"`
@@ -184,10 +221,20 @@ func createOneDriveRemoteAuto(rcloneBin string, remoteName string) error {
 			return answerErr
 		}
 
-		next, stepErr := runConfigContinuePrompt(rcloneBin, remoteName, prompt.State, answer)
-		if stepErr != nil {
-			cleanup()
-			return stepErr
+		var (
+			next    rcloneConfigPrompt
+			stepErr error
+		)
+		for attempt := 0; attempt < 4; attempt++ {
+			next, stepErr = runConfigContinuePrompt(rcloneBin, remoteName, prompt.State, answer)
+			if stepErr == nil {
+				break
+			}
+			if !isTransientOneDriveError(stepErr.Error()) || attempt == 3 {
+				cleanup()
+				return stepErr
+			}
+			time.Sleep(oneDriveRetryDelay(attempt))
 		}
 
 		prompt = next
@@ -198,7 +245,49 @@ func createOneDriveRemoteAuto(rcloneBin string, remoteName string) error {
 		return errors.New("create remote failed: fluxo de configuracao do OneDrive excedeu o limite de etapas")
 	}
 
+	if err := validateOneDriveRemote(rcloneBin, remoteName); err != nil {
+		cleanup()
+		return err
+	}
+
 	return nil
+}
+
+func validateOneDriveRemote(rcloneBin string, remoteName string) error {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		cmd := exec.Command(
+			rcloneBin,
+			"--retries", "1",
+			"--low-level-retries", "1",
+			"--timeout", "20s",
+			"lsd",
+			remoteName+":",
+		)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			lastErr = fmt.Errorf("create remote failed: validacao final do OneDrive falhou: %w", err)
+		} else {
+			lastErr = fmt.Errorf("create remote failed: validacao final do OneDrive falhou: %s", message)
+		}
+
+		if !isTransientOneDriveError(lastErr.Error()) || attempt == 3 {
+			return lastErr
+		}
+
+		time.Sleep(oneDriveRetryDelay(attempt))
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+
+	return errors.New("create remote failed: validacao final do OneDrive falhou")
 }
 
 func runConfigCreatePrompt(rcloneBin string, remoteName string, provider string) (rcloneConfigPrompt, error) {
@@ -239,20 +328,90 @@ func runConfigContinuePrompt(rcloneBin string, remoteName string, state string, 
 
 func parseRclonePrompt(out []byte) (rcloneConfigPrompt, bool) {
 	trimmed := bytes.TrimSpace(out)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
+	if len(trimmed) == 0 {
 		return rcloneConfigPrompt{}, false
 	}
 
-	var prompt rcloneConfigPrompt
-	if err := json.Unmarshal(trimmed, &prompt); err != nil {
-		return rcloneConfigPrompt{}, false
+	candidates := make([][]byte, 0, 8)
+
+	if trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' {
+		candidates = append(candidates, trimmed)
 	}
 
-	if prompt.State == "" && prompt.Option.Name == "" && prompt.Error == "" && prompt.Result == "" {
-		return rcloneConfigPrompt{}, false
+	if object := extractFirstJSONObject(trimmed); len(object) > 0 {
+		candidates = append(candidates, object)
 	}
 
-	return prompt, true
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) < 2 {
+			continue
+		}
+		if line[0] == '{' && line[len(line)-1] == '}' {
+			candidates = append(candidates, line)
+		}
+	}
+
+	for i := len(candidates) - 1; i >= 0; i-- {
+		var prompt rcloneConfigPrompt
+		if err := json.Unmarshal(candidates[i], &prompt); err != nil {
+			continue
+		}
+
+		if prompt.State == "" && prompt.Option.Name == "" && prompt.Error == "" && prompt.Result == "" {
+			continue
+		}
+
+		return prompt, true
+	}
+
+	return rcloneConfigPrompt{}, false
+}
+
+func extractFirstJSONObject(data []byte) []byte {
+	start := -1
+	depth := 0
+	inString := false
+	escaped := false
+
+	for i, b := range data {
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		if b == '\\' {
+			escaped = true
+			continue
+		}
+
+		if b == '"' {
+			inString = !inString
+			continue
+		}
+
+		if inString {
+			continue
+		}
+
+		switch b {
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth == 0 {
+				continue
+			}
+			depth--
+			if depth == 0 && start >= 0 {
+				return bytes.TrimSpace(data[start : i+1])
+			}
+		}
+	}
+
+	return nil
 }
 
 func choosePromptAnswer(provider string, prompt rcloneConfigPrompt) (string, error) {
@@ -268,6 +427,16 @@ func choosePromptAnswer(provider string, prompt rcloneConfigPrompt) (string, err
 			}
 			if v, err := preferChoice(prompt.Option.Examples, "business"); err == nil {
 				return v, nil
+			}
+		case "drive_id":
+			if v := strings.TrimSpace(prompt.Option.DefaultStr); v != "" {
+				return v, nil
+			}
+			if v, ok := preferOneDriveDriveID(prompt.Option.Examples); ok {
+				return v, nil
+			}
+			if !prompt.Option.Required {
+				return "", nil
 			}
 		case "config_type":
 			if v, err := preferChoice(prompt.Option.Examples, "onedrive"); err == nil {
@@ -323,8 +492,20 @@ func choosePromptAnswer(provider string, prompt rcloneConfigPrompt) (string, err
 }
 
 func preferChoice(choices []rcloneConfigChoice, value string) (string, error) {
+	target := strings.ToLower(strings.TrimSpace(value))
+	if target == "" {
+		return "", fmt.Errorf("valor alvo vazio")
+	}
+
 	for _, choice := range choices {
-		if strings.EqualFold(choice.Value, value) {
+		if strings.EqualFold(strings.TrimSpace(choice.Value), target) {
+			return choice.Value, nil
+		}
+	}
+
+	for _, choice := range choices {
+		help := strings.ToLower(strings.TrimSpace(choice.Help))
+		if help != "" && strings.Contains(help, target) {
 			return choice.Value, nil
 		}
 	}
@@ -334,6 +515,78 @@ func preferChoice(choices []rcloneConfigChoice, value string) (string, error) {
 	}
 
 	return "", fmt.Errorf("nenhuma opcao disponivel")
+}
+
+func isMissingRemoteError(output string) bool {
+	normalized := strings.ToLower(output)
+	return strings.Contains(normalized, "didn't find section") ||
+		strings.Contains(normalized, "not found in config file") ||
+		strings.Contains(normalized, "could not find section")
+}
+
+func preferOneDriveDriveID(choices []rcloneConfigChoice) (string, bool) {
+	if len(choices) == 0 {
+		return "", false
+	}
+
+	for _, choice := range choices {
+		help := strings.ToLower(strings.TrimSpace(choice.Help))
+		if help == "" {
+			continue
+		}
+
+		// Prefer personal/root-ish drives and avoid SharePoint/DocumentLibrary-like entries.
+		if strings.Contains(help, "personal") ||
+			(strings.Contains(help, "onedrive") && !strings.Contains(help, "sharepoint") && !strings.Contains(help, "library") && !strings.Contains(help, "site")) {
+			value := strings.TrimSpace(choice.Value)
+			if value != "" {
+				return value, true
+			}
+		}
+	}
+
+	for _, choice := range choices {
+		help := strings.ToLower(strings.TrimSpace(choice.Help))
+		if strings.Contains(help, "sharepoint") || strings.Contains(help, "library") || strings.Contains(help, "site") {
+			continue
+		}
+		value := strings.TrimSpace(choice.Value)
+		if value != "" {
+			return value, true
+		}
+	}
+
+	for _, choice := range choices {
+		value := strings.TrimSpace(choice.Value)
+		if value != "" {
+			return value, true
+		}
+	}
+
+	return "", false
+}
+
+func isTransientOneDriveError(message string) bool {
+	normalized := strings.ToLower(message)
+	return strings.Contains(normalized, "service unavailable") ||
+		strings.Contains(normalized, "servicenotavailable") ||
+		strings.Contains(normalized, "http error 503") ||
+		strings.Contains(normalized, "timeout") ||
+		strings.Contains(normalized, "temporar") ||
+		strings.Contains(normalized, "try again") ||
+		strings.Contains(normalized, "rate limit") ||
+		strings.Contains(normalized, "too many requests") ||
+		strings.Contains(normalized, "http error 429")
+}
+
+func oneDriveRetryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt > 4 {
+		attempt = 4
+	}
+	return time.Duration(1<<attempt) * time.Second
 }
 
 func (a *Application) SetPollingInterval(intervalMs int) {

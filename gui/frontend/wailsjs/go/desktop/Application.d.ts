@@ -4,6 +4,8 @@ import {core} from '../models';
 
 export function CreateCloudRemote(arg1:string,arg2:string):Promise<core.ActionResult>;
 
+export function DeleteCloudRemote(arg1:string):Promise<core.ActionResult>;
+
 export function ExecuteAction(arg1:string,arg2:string):Promise<core.ActionResult>;
 
 export function ExecuteActionWithOptions(arg1:string,arg2:string,arg3:string,arg4:boolean):Promise<core.ActionResult>;
