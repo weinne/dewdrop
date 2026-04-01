@@ -44,6 +44,81 @@ log_err() {
   echo -e "${COLOR_RED}Erro:${COLOR_RESET} $*" >&2
 }
 
+get_system_desktop_entry_path() {
+  echo "/usr/share/applications/rclone-auto-gui.desktop"
+}
+
+get_user_desktop_dir() {
+  if command -v xdg-user-dir >/dev/null 2>&1; then
+    xdg-user-dir DESKTOP 2>/dev/null || true
+    return 0
+  fi
+  echo "${HOME}/Desktop"
+}
+
+create_default_desktop_entry() {
+  cat <<'EOF'
+[Desktop Entry]
+Name=Dewdrop
+Comment=Cloud mount and sync manager (requires rclone)
+Exec=rclone-auto-gui
+Icon=folder-remote
+Terminal=false
+Type=Application
+Categories=Utility;Network;
+EOF
+}
+
+ensure_desktop_shortcuts() {
+  local system_desktop
+  system_desktop="$(get_system_desktop_entry_path)"
+
+  if [[ -f "$system_desktop" ]]; then
+    log_ok "Atalho de sistema encontrado: $system_desktop"
+  else
+    log_warn "Atalho de sistema não encontrado. Criando: $system_desktop"
+    if [[ -f "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" ]]; then
+      sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" "$system_desktop"
+    else
+      local tmp_desktop
+      tmp_desktop="$(mktemp)"
+      create_default_desktop_entry >"$tmp_desktop"
+      sudo install -Dm644 "$tmp_desktop" "$system_desktop"
+      rm -f "$tmp_desktop"
+    fi
+  fi
+
+  local desktop_dir
+  desktop_dir="$(get_user_desktop_dir)"
+  if [[ -z "$desktop_dir" ]]; then
+    desktop_dir="${HOME}/Desktop"
+  fi
+  mkdir -p "$desktop_dir"
+
+  local user_desktop="$desktop_dir/rclone-auto-gui.desktop"
+  if [[ -f "$user_desktop" ]]; then
+    log_ok "Atalho do usuário já existe: $user_desktop"
+  else
+    cp "$system_desktop" "$user_desktop"
+    chmod +x "$user_desktop" || true
+    log_ok "Atalho do usuário criado: $user_desktop"
+  fi
+}
+
+install_or_update_binary() {
+  local source_bin="$1"
+  local target_bin="/usr/local/bin/rclone-auto-gui"
+
+  if [[ -x "$target_bin" ]]; then
+    log_warn "Instalação existente detectada em $target_bin. Sobrescrevendo com a versão atual..."
+  else
+    log_step "Instalando binário em $target_bin..."
+  fi
+
+  sudo install -Dm755 "$source_bin" "$target_bin"
+  log_ok "Binário instalado/atualizado: $target_bin"
+}
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     log_err "comando '$1' não encontrado."
@@ -155,12 +230,22 @@ install_from_release_package() {
       local deb_name="rclone-auto-gui_${version}_amd64.deb"
       download_release_asset "$release_tag" "$deb_name" "$temp_dir/$deb_name"
       sudo apt-get update
-      sudo apt-get install -y "$temp_dir/$deb_name"
+      if dpkg -s rclone-auto-gui >/dev/null 2>&1; then
+        log_warn "Pacote rclone-auto-gui já instalado. Reinstalando para garantir atualização..."
+        sudo apt-get install -y --reinstall "$temp_dir/$deb_name"
+      else
+        sudo apt-get install -y "$temp_dir/$deb_name"
+      fi
       ;;
     dnf)
       local rpm_name="rclone-auto-gui-${version}-1.x86_64.rpm"
       download_release_asset "$release_tag" "$rpm_name" "$temp_dir/$rpm_name"
-      sudo dnf install -y "$temp_dir/$rpm_name"
+      if rpm -q rclone-auto-gui >/dev/null 2>&1; then
+        log_warn "Pacote rclone-auto-gui já instalado. Reinstalando para garantir atualização..."
+        sudo dnf reinstall -y "$temp_dir/$rpm_name"
+      else
+        sudo dnf install -y "$temp_dir/$rpm_name"
+      fi
       ;;
     *)
       log_err "instalação por pacote não suportada para o gerenciador '$manager'."
@@ -168,6 +253,7 @@ install_from_release_package() {
       ;;
   esac
 
+  ensure_desktop_shortcuts
   log_ok "Instalação concluída via pacote da release ${release_tag}. Rode: rclone-auto-gui"
 }
 
@@ -204,11 +290,8 @@ build_from_release_source() {
   log_step "Compilando aplicação GUI a partir da release ${release_tag}..."
   build_gui_binary
 
-  log_step "Instalando binário em /usr/local/bin..."
-  sudo install -Dm755 "$GUI_DIR/rclone-auto-gui" /usr/local/bin/rclone-auto-gui
-
-  log_step "Instalando atalho desktop..."
-  sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
+  install_or_update_binary "$GUI_DIR/rclone-auto-gui"
+  ensure_desktop_shortcuts
 
   log_ok "Instalação concluída por build da release ${release_tag}. Rode: rclone-auto-gui"
 }
@@ -352,11 +435,8 @@ main() {
     log_step "Compilando aplicação GUI..."
     build_gui_binary
 
-    log_step "Instalando binário em /usr/local/bin..."
-    sudo install -Dm755 "$GUI_DIR/rclone-auto-gui" /usr/local/bin/rclone-auto-gui
-
-    log_step "Instalando atalho desktop..."
-    sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
+    install_or_update_binary "$GUI_DIR/rclone-auto-gui"
+    ensure_desktop_shortcuts
 
     log_ok "Instalação concluída. Rode: rclone-auto-gui"
     return 0
