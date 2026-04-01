@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GUI_DIR="$ROOT_DIR/gui"
 WAILS_BUILD_TAGS="${WAILS_BUILD_TAGS:-}"
+RELEASE_REPO="${RELEASE_REPO:-weinne/dewdrop}"
+RELEASE_TAG="${RELEASE_TAG:-latest}"
+
+set_root_dir() {
+  ROOT_DIR="$1"
+  GUI_DIR="$ROOT_DIR/gui"
+}
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -31,7 +39,113 @@ install_deps_dnf() {
 install_deps_pacman() {
   sudo pacman -Syu --noconfirm
   sudo pacman -S --needed --noconfirm \
-    rclone fuse3 systemd webkit2gtk-4.1 base-devel
+    rclone fuse3 systemd webkit2gtk-4.1 base-devel go
+}
+
+in_repo_layout() {
+  [[ -d "$ROOT_DIR/gui" && -f "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" ]]
+}
+
+resolve_release_tag() {
+  if [[ "$RELEASE_TAG" != "latest" ]]; then
+    echo "$RELEASE_TAG"
+    return 0
+  fi
+
+  require_cmd curl
+  local tag
+  tag="$(curl -fsSL "https://api.github.com/repos/${RELEASE_REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+
+  if [[ -z "$tag" ]]; then
+    echo "Erro: não foi possível descobrir a última release de ${RELEASE_REPO}." >&2
+    exit 1
+  fi
+
+  echo "$tag"
+}
+
+download_release_asset() {
+  local release_tag="$1"
+  local file_name="$2"
+  local out_file="$3"
+
+  require_cmd curl
+  local url="https://github.com/${RELEASE_REPO}/releases/download/${release_tag}/${file_name}"
+  echo "Baixando $file_name de $url"
+  curl -fL "$url" -o "$out_file"
+}
+
+install_from_release_package() {
+  local manager="$1"
+  local release_tag
+  release_tag="$(resolve_release_tag)"
+  local version="${release_tag#v}"
+
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+
+  case "$manager" in
+    apt)
+      local deb_name="rclone-auto-gui_${version}_amd64.deb"
+      download_release_asset "$release_tag" "$deb_name" "$temp_dir/$deb_name"
+      sudo apt-get update
+      sudo apt-get install -y "$temp_dir/$deb_name"
+      ;;
+    dnf)
+      local rpm_name="rclone-auto-gui-${version}-1.x86_64.rpm"
+      download_release_asset "$release_tag" "$rpm_name" "$temp_dir/$rpm_name"
+      sudo dnf install -y "$temp_dir/$rpm_name"
+      ;;
+    *)
+      echo "Erro: instalação por pacote não suportada para o gerenciador '$manager'." >&2
+      exit 1
+      ;;
+  esac
+
+  echo "Instalação concluída via pacote da release ${release_tag}. Rode: rclone-auto-gui"
+}
+
+build_from_release_source() {
+  local release_tag
+  release_tag="$(resolve_release_tag)"
+
+  require_cmd curl
+  require_cmd tar
+
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+
+  local tarball_url="https://github.com/${RELEASE_REPO}/archive/refs/tags/${release_tag}.tar.gz"
+  local tarball_path="$temp_dir/source.tar.gz"
+
+  echo "Baixando código-fonte da release ${release_tag}..."
+  curl -fL "$tarball_url" -o "$tarball_path"
+  tar -xzf "$tarball_path" -C "$temp_dir"
+
+  local extracted
+  extracted="$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  if [[ -z "$extracted" ]]; then
+    echo "Erro: não foi possível extrair o código-fonte da release ${release_tag}." >&2
+    exit 1
+  fi
+
+  set_root_dir "$extracted"
+
+  install_system_deps
+  install_go_if_missing
+
+  echo "Compilando aplicação GUI a partir da release ${release_tag}..."
+  build_gui_binary
+
+  echo "Instalando binário em /usr/local/bin..."
+  sudo install -Dm755 "$GUI_DIR/rclone-auto-gui" /usr/local/bin/rclone-auto-gui
+
+  echo "Instalando atalho desktop..."
+  sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
+
+  echo "Instalação concluída por build da release ${release_tag}. Rode: rclone-auto-gui"
 }
 
 detect_webkit_tag() {
@@ -134,26 +248,71 @@ build_gui_binary() {
   return 1
 }
 
-main() {
-  require_cmd bash
-  install_system_deps
-  install_go_if_missing
+print_usage() {
+  cat <<'EOF'
+Uso:
+  ./scripts/install-gui.sh
 
-  if ! command -v go >/dev/null 2>&1; then
-    echo "Erro: Go não disponível após tentativa de instalação." >&2
-    exit 1
+Comportamento:
+  - Dentro do repositório: instala dependências, compila e instala a GUI.
+  - Fora do repositório:
+    - apt/dnf: baixa pacote da release e instala.
+    - pacman: baixa código-fonte da release, compila e instala.
+
+Variáveis opcionais:
+  RELEASE_REPO=weinne/dewdrop   # owner/repo da release
+  RELEASE_TAG=latest            # ex: v0.1.0
+  WAILS_BUILD_TAGS=production,webkit2_41
+EOF
+}
+
+main() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    print_usage
+    return 0
   fi
 
-  echo "Compilando aplicação GUI..."
-  build_gui_binary
+  require_cmd bash
 
-  echo "Instalando binário em /usr/local/bin..."
-  sudo install -Dm755 rclone-auto-gui /usr/local/bin/rclone-auto-gui
+  if in_repo_layout; then
+    install_system_deps
+    install_go_if_missing
 
-  echo "Instalando atalho desktop..."
-  sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
+    if ! command -v go >/dev/null 2>&1; then
+      echo "Erro: Go não disponível após tentativa de instalação." >&2
+      exit 1
+    fi
 
-  echo "Instalação concluída. Rode: rclone-auto-gui"
+    echo "Compilando aplicação GUI..."
+    build_gui_binary
+
+    echo "Instalando binário em /usr/local/bin..."
+    sudo install -Dm755 "$GUI_DIR/rclone-auto-gui" /usr/local/bin/rclone-auto-gui
+
+    echo "Instalando atalho desktop..."
+    sudo install -Dm644 "$ROOT_DIR/packaging/nfpm/rclone-auto-gui.desktop" /usr/share/applications/rclone-auto-gui.desktop
+
+    echo "Instalação concluída. Rode: rclone-auto-gui"
+    return 0
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    install_from_release_package "apt"
+    return 0
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    install_from_release_package "dnf"
+    return 0
+  fi
+
+  if command -v pacman >/dev/null 2>&1; then
+    build_from_release_source
+    return 0
+  fi
+
+  echo "Erro: não foi possível determinar um método de instalação para esta distro." >&2
+  exit 1
 }
 
 main "$@"
