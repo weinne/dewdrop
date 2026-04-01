@@ -1,0 +1,17 @@
+pkgbase = rclone-auto-gui
+	pkgdesc = Simple desktop cloud mount/sync manager for Linux using rclone
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/weinne/rclone-auto
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = go
+	depends = rclone
+	depends = fuse3
+	depends = systemd
+	depends = webkit2gtk-4.1
+	source = rclone-auto-gui-0.1.0.tar.gz::https://github.com/weinne/rclone-auto/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = rclone-auto-gui

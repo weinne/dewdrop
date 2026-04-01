@@ -1,0 +1,43 @@
+# Maintainer: Weinne <weinne@example.com>
+
+pkgname=rclone-auto-gui
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Simple desktop cloud mount/sync manager for Linux using rclone"
+arch=('x86_64' 'aarch64')
+url="https://github.com/weinne/rclone-auto"
+license=('MIT')
+depends=('rclone' 'fuse3' 'systemd' 'webkit2gtk-4.1')
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/weinne/rclone-auto/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/rclone-auto-$pkgver/gui"
+  export CGO_ENABLED=1
+
+  local webkit_tag="${WAILS_BUILD_TAGS:-webkit2_41}"
+  if [[ ",$webkit_tag," != *",production,"* && ",$webkit_tag," != *",dev,"* && ",$webkit_tag," != *",bindings,"* ]]; then
+    webkit_tag="production,${webkit_tag}"
+  fi
+
+  go build -tags "$webkit_tag" -o rclone-auto-gui .
+}
+
+package() {
+  cd "$srcdir/rclone-auto-$pkgver/gui"
+
+  install -Dm755 rclone-auto-gui "$pkgdir/usr/bin/rclone-auto-gui"
+  install -Dm644 ../LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/rclone-auto-gui.desktop" <<'EOF'
+[Desktop Entry]
+Name=Dewdrop
+Comment=Cloud mount and sync manager (requires rclone)
+Exec=rclone-auto-gui
+Icon=folder-remote
+Terminal=false
+Type=Application
+Categories=Utility;Network;
+EOF
+}

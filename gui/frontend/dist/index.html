@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dewdrop</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-a"></div>
+    <div class="bg-shape bg-b"></div>
+
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <h1>Dewdrop</h1>
+          <small>Nuvem descomplicada no Linux</small>
+        </div>
+        <div class="topbar-actions">
+          <button id="openSettingsBtn" class="ghost-btn">Configurações</button>
+          <div class="pill" id="trayState">loading</div>
+        </div>
+      </header>
+
+      <section class="hero">
+        <h2>Conecte sua conta e escolha um fluxo sob medida</h2>
+        <p>
+          O Dewdrop usa o rclone como dependência e entrega uma experiência guiada: conecte a conta uma
+          vez e decida entre montagem sob demanda ou sincronização automática com cópia local.
+        </p>
+        <div class="hero-actions">
+          <button id="connectAccountBtn">Conectar conta na nuvem</button>
+          <button id="refreshBtn">Atualizar status</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Serviços configurados</h2>
+        <div id="remoteList" class="remote-list"></div>
+      </section>
+
+      <div id="toast" class="toast" aria-live="polite"></div>
+
+      <div id="connectModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="connectTitle">
+        <div class="modal-panel">
+          <div class="wizard-timeline">
+            <div class="wizard-step active">
+              <span>1</span>
+              <small>Conectar conta</small>
+            </div>
+            <div class="wizard-step">
+              <span>2</span>
+              <small>Escolher modo</small>
+            </div>
+          </div>
+
+          <h3 id="connectTitle">Conectar uma conta</h3>
+          <p>Escolha o serviço e um nome simples para identificar sua conta.</p>
+
+          <div class="provider-picker-block">
+            <span class="field-label">Serviço de nuvem</span>
+            <div id="providerCards" class="provider-card-grid" role="listbox" aria-label="Serviço de nuvem"></div>
+            <input id="providerInput" type="hidden" value="drive" />
+          </div>
+
+          <label>
+            Nome da conta
+            <input id="remoteNameInput" type="text" placeholder="ex: pessoal" />
+          </label>
+
+          <div class="modal-actions">
+            <button id="cancelConnectBtn">Cancelar</button>
+            <button id="confirmConnectBtn">Conectar agora</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="setupModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+        <div class="modal-panel">
+          <div class="wizard-timeline">
+            <div class="wizard-step done">
+              <span>1</span>
+              <small>Conectar conta</small>
+            </div>
+            <div class="wizard-step active">
+              <span>2</span>
+              <small>Escolher modo</small>
+            </div>
+          </div>
+
+          <h3 id="setupTitle">Como você quer usar essa conta?</h3>
+          <p>
+            Escolha o modo mais simples para você. Você pode trocar isso depois sem perder sua conta.
+          </p>
+
+          <div class="mode-grid">
+            <label class="mode-option">
+              <input type="radio" name="setupMode" value="setup-mount" checked />
+              <span>
+                <strong>Pasta conectada (recomendado)</strong>
+                <small>Você vê a pasta na hora e usa pouco espaço local.</small>
+              </span>
+            </label>
+
+            <label class="mode-option">
+              <input type="radio" name="setupMode" value="setup-sync" />
+              <span>
+                <strong>Pasta sincronizada</strong>
+                <small>Fica uma cópia no seu computador e sincroniza automaticamente.</small>
+              </span>
+            </label>
+          </div>
+
+          <label>
+            Pasta local
+            <input id="setupPathInput" type="text" placeholder="/home/seu-usuario/Nuvem/pessoal" />
+          </label>
+
+          <label class="check-row">
+            <input id="setupAutoStartInput" type="checkbox" checked />
+            <span>Iniciar automaticamente com a sessão</span>
+          </label>
+
+          <div class="modal-actions">
+            <button id="cancelSetupBtn">Agora não</button>
+            <button id="confirmSetupBtn">Aplicar e começar</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal-panel">
+          <h3 id="settingsTitle">Configurações</h3>
+          <p>Opções gerais e avançadas ficam aqui para manter a tela principal simples.</p>
+
+          <label class="check-row">
+            <input id="settingsDefaultAutoStart" type="checkbox" checked />
+            <span>Iniciar novas contas automaticamente com a sessão</span>
+          </label>
+
+          <label>
+            Atualização automática de status (ms)
+            <input id="settingsPollingInput" type="number" min="1000" value="3000" />
+          </label>
+
+          <div class="modal-actions">
+            <button id="cancelSettingsBtn">Fechar</button>
+            <button id="saveSettingsBtn">Salvar</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="remoteSettingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="remoteSettingsTitle">
+        <div class="modal-panel">
+          <h3 id="remoteSettingsTitle">Configurações da conta</h3>
+          <p id="remoteSettingsSubtitle">Ações avançadas para esta conta.</p>
+
+          <div id="remoteStatePanel" class="remote-state-panel state-disabled">
+            <h4 id="remoteStateTitle">Serviço desativado</h4>
+            <p id="remoteStateDescription">Ative um modo para começar a usar esta conta.</p>
+          </div>
+
+          <div id="remoteDiagnosticsBox" class="diagnostics-box hidden">
+            <h4>Diagnóstico</h4>
+            <pre id="remoteDiagnosticsText"></pre>
+          </div>
+
+          <div class="advanced-sections" id="advancedActionsContainer"></div>
+
+          <div class="modal-actions">
+            <button id="closeRemoteSettingsBtn">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

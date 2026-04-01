@@ -10,6 +10,58 @@
 
 **RClone Auto** is an advanced Bash script that automates configuration, mounting and synchronization of **Rclone** remotes. It hides CLI complexity behind a rich visual experience (menus, filters, colors) and ensures persistence via `systemd --user`.
 
+## Native GUI Work In Progress
+
+The native Linux GUI implementation has started in [gui/README.md](gui/README.md).
+
+Current implementation status:
+
+- Backend module in Go for remote discovery and unit status orchestration.
+- JSON snapshot output for future Wails dashboard and tray integration.
+- Compatibility maintained with existing config and unit naming conventions.
+- Wails desktop shell with live snapshot events and a first dashboard view.
+
+## Packaging and Installation
+
+The GUI app can be distributed as:
+
+- `.deb` and `.rpm` using `nfpm` config in [packaging/nfpm/nfpm.yaml](packaging/nfpm/nfpm.yaml)
+- `AUR` package with [packaging/aur/PKGBUILD](packaging/aur/PKGBUILD)
+- Cross-distro installer script: [scripts/install-gui.sh](scripts/install-gui.sh)
+
+### Runtime dependency policy
+
+At startup, the GUI checks required dependencies (`rclone`, `systemd --user`, `fuse3`).
+If requirements are missing, the app exits early with a clear error.
+
+### Build packages (.deb / .rpm)
+
+Use the release helper script:
+
+```bash
+./scripts/build-packages.sh
+```
+
+If needed, override build tags/version:
+
+```bash
+WAILS_BUILD_TAGS=production,webkit2_40 VERSION=0.1.0 ./scripts/build-packages.sh
+```
+
+### Install script
+
+```bash
+./scripts/install-gui.sh
+```
+
+The script installs dependencies, builds the GUI and installs it under `/usr/local/bin/rclone-auto-gui`.
+It automatically tries compatible Wails Linux build tags (`production,webkit2_41`, `production,webkit2_40`, `production,webkit2_36`) and uses the first one that works.
+If needed, override build tags with `WAILS_BUILD_TAGS`, for example:
+
+```bash
+WAILS_BUILD_TAGS=production,webkit2_40 ./scripts/install-gui.sh
+```
+
 ---
 
 ## ✨ Main Features

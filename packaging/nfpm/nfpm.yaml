@@ -1,0 +1,37 @@
+name: rclone-auto-gui
+arch: amd64
+platform: linux
+version: 0.1.0
+section: utils
+priority: optional
+maintainer: Weinne <weinne@example.com>
+description: |
+  Simple desktop app to connect cloud providers and mount/sync folders with rclone.
+homepage: https://github.com/weinne/rclone-auto
+license: MIT
+contents:
+  - src: ./gui/build/bin/rclone-auto-gui
+    dst: /usr/bin/rclone-auto-gui
+    file_info:
+      mode: 0755
+  - src: ./LICENSE.md
+    dst: /usr/share/licenses/rclone-auto-gui/LICENSE
+    file_info:
+      mode: 0644
+  - src: ./packaging/nfpm/rclone-auto-gui.desktop
+    dst: /usr/share/applications/rclone-auto-gui.desktop
+    file_info:
+      mode: 0644
+overrides:
+  deb:
+    depends:
+      - rclone
+      - fuse3
+      - systemd
+      - libwebkit2gtk-4.1-0
+  rpm:
+    depends:
+      - rclone
+      - fuse3
+      - systemd
+      - webkit2gtk4.1
