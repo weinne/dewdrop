@@ -308,7 +308,7 @@ build_gui_binary() {
   log_err "não foi possível compilar com nenhuma tag Wails suportada."
   echo "Tentativas: ${tag_candidates[*]}" >&2
   echo "Dica: exporte WAILS_BUILD_TAGS manualmente e rode de novo." >&2
-  echo "Exemplo: WAILS_BUILD_TAGS=production,webkit2_41 ./scripts/install-gui.sh" >&2
+  echo "Exemplo: WAILS_BUILD_TAGS=production,webkit2_41 ./scripts/install.sh" >&2
   echo "Ultima tentativa: $last_candidate" >&2
   return 1
 }
@@ -316,7 +316,7 @@ build_gui_binary() {
 print_usage() {
   cat <<'EOF'
 Uso:
-  ./scripts/install-gui.sh
+  ./scripts/install.sh
 
 Comportamento:
   - Dentro do repositório: instala dependências, compila e instala a GUI.

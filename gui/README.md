@@ -59,5 +59,5 @@ The command emits JSON snapshots intended for GUI/tray consumers.
 
 - AUR: [../packaging/aur/PKGBUILD](../packaging/aur/PKGBUILD)
 - DEB/RPM: [../packaging/nfpm/nfpm.yaml](../packaging/nfpm/nfpm.yaml)
-- Installer script: [../scripts/install-gui.sh](../scripts/install-gui.sh)
+- Installer script: [../scripts/install.sh](../scripts/install.sh)
 - Package builder script: [../scripts/build-packages.sh](../scripts/build-packages.sh)
